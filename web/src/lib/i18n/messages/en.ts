@@ -252,6 +252,9 @@ export const en = {
   "settings.display.textSize.label": "Text size",
   "settings.display.textSize.decrease": "Decrease font size",
   "settings.display.textSize.increase": "Increase font size",
+  "settings.display.fitWidth.label": "Fit text to pane",
+  "settings.display.fitWidth.hint":
+    "On, the mirror sizes its text to the captured terminal width. Off, the +/- buttons keep a fixed size.",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "new build — tap to update",

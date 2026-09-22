@@ -11,7 +11,7 @@ export const NAV_BUSY_THRESHOLD_MS = 500;
 
 // A background revalidation (the poll) is AMBIENT — nobody is staring at it, so the strip should
 // only fire when a poll has HUNG, not merely when the link is slow. On-device, over the user's
-// HTTPS reverse proxy with large streaming-pane payloads on a 1.5s hot-poll cadence, single
+// HTTPS reverse proxy with large streaming-pane payloads, single
 // revalidations routinely sit in flight for 0.5–3s as chronic-but-normal behavior for that link —
 // "stops briefly, then continues" is not a problem and must never surface the strip. This threshold
 // is well past any plausible normal round-trip on that link (roughly halfway to the 12s supersede

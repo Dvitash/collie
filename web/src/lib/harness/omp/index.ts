@@ -1,10 +1,10 @@
 // The omp adapter (oh-my-pi's `omp` CLI, v17.2.12 through v18.4.10), the second registered harness.
-// Its boxed-composer scanner (chrome.ts), rule-composer scanner (rule.ts) and shared lexing primitives
-// (markers.ts) live alongside this file; this module composes them into the HarnessAdapter block and
-// chrome re-surfacing surfaces. The `/resume` picker grammar is resume.ts, the `ask` tool's
-// single-select grammar is ask.ts, the tool-approval grammar is approval.ts, the compact model picker
-// grammar is switch.ts, and the modal gate that lets the unread-dialog card stand over every other omp
-// modal is modal.ts.
+// Its boxed-composer scanner (chrome.ts), rule-composer scanner (rule.ts), extension top-dock scanner
+// (top-dock.ts) and shared lexing primitives (markers.ts) live alongside this file; this module
+// composes them into the HarnessAdapter block and chrome re-surfacing surfaces. The `/resume` picker
+// grammar is resume.ts, the `ask` tool's single-select grammar is ask.ts, the tool-approval grammar
+// is approval.ts, the compact model picker grammar is switch.ts, and the modal gate that lets the
+// unread-dialog card stand over every other omp modal is modal.ts.
 //
 // This adapter is TIER 1 EVERYWHERE EXCEPT FOUR SCREENS. `ompBuildBlocks` lifts the `/resume` session
 // picker (resume.ts, .adr/0076), the `ask` tool's one-question single-select dialog (ask.ts,
@@ -54,13 +54,13 @@
 // the legacy one-shot send: type AND submit in a single call. A phone reply sent while any modal owned
 // the keyboard therefore fired the submit key at that modal, which confirms whatever row it had
 // highlighted. Registering ANY adapter swaps that for type-then-verify — the submit key waits until
-// `extractInputDraft` can see the text in the input — the composer, boxed or rule-shaped, or the
-// `ask` tool's answer editor — while `composerReady` adds the pre-flight on top, reading the pane
-// once BEFORE typing. It definitively answers `false` on every capture in this corpus where a modal
-// is up (harness/omp.test.ts), so the message never reaches the modal either. Two honest edges: a
-// failed pre-flight read falls through rather than blocking a send, and the user's deliberate `force`
-// retry skips the pre-flight — in both cases type-then-verify is still what stands between the send
-// and the submit key.
+// `extractInputDraft` can see the text in the input — the composer, boxed, rule-shaped or
+// top-dock-shaped, or the `ask` tool's answer editor — while `composerReady` adds the pre-flight on
+// top, reading the pane once BEFORE typing. It definitively answers `false` on every capture in this
+// corpus where a modal is up (harness/omp.test.ts), so the message never reaches the modal either.
+// Two honest edges: a failed pre-flight read falls through rather than blocking a send, and the
+// user's deliberate `force` retry skips the pre-flight — in both cases type-then-verify is still what
+// stands between the send and the submit key.
 //
 // How much of "every other screen stays raw" is TESTED versus STRUCTURAL, because the two are not the
 // same guarantee:
@@ -95,20 +95,23 @@
 // character at column 0 (`╭`, `│`, `╰`), which is exactly what `BOX_ROW` matches. `composerReady` is
 // asserted `false` on all eight captures rather than argued about.
 //
-// Two fixture-derived scanners now carry that chrome claim. The boxed OMP 17/18.1.2 form remains
+// Three fixture-derived scanners now carry that chrome claim. The boxed OMP 17/18.1.2 form remains
 // anchored on `╰─ … ─╯` (closed or clipped) plus its adjacent top/status row. OMP 18.1.10's `rule`
 // form has no bottom border, so rule.ts instead requires its renderer's whole tail choreography:
 // a status-bearing top rule directly above `❯` plus bounded continuation rows, then exactly one blank
-// gap and one standalone status row at the buffer tail. Neither scanner searches past a completed
-// transcript row, and every captured picker and Ask dialog still makes both return null.
+// gap and one standalone status row at the buffer tail. The extension's `top-dock` form has no border
+// or footer, so top-dock.ts requires its two fully background-painted status rows immediately above
+// the prompt. None of these scanners searches past a completed transcript row, and every captured
+// picker and Ask dialog still makes them all return null.
 //
-// OMP 18.4's `claude` and `borderless` composer shapes (issue #343) carry a third scanner, glyph-prompt.ts.
+// OMP 18.4's `claude` and `borderless` composer shapes (issue #343) carry another scanner, glyph-prompt.ts.
 // `claude` is a rule pair around the `❯` rows with the status row directly under the bottom rule;
 // `borderless` has no rule, so it takes only the `❯` rows directly above a styled status row that is the
 // last non-blank row. Each declines on any modal and on every other shape's tail.
 
 import { trimTrailingBlank, type Block, type StyledLine } from "../../blocks";
 import type { HarnessAdapter } from "../types";
+import { locateTopDockComposer, extractTopDockDraft, extractTopDockStatusLines, stripTopDockChrome, topDockComposerPrompt } from "./top-dock";
 import { locatePiComposer, piDraft } from "./pi-shape";
 import {
   extractGlyphInputDraft,
@@ -181,6 +184,8 @@ export function ompBuildBlocks(lines: StyledLine[]): Block[] {
 }
 
 export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return decorateOmpDisplay(extractTopDockStatusLines(lines, topDock));
   const pi = locatePiComposer(lines);
   if (pi) return decorateOmpDisplay(lines.slice(pi.bottom + 1, pi.suggestEnd));
   const rule = locateRuleComposer(lines);
@@ -191,6 +196,8 @@ export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
 }
 
 export function extractInputDraft(lines: StyledLine[]): string | null {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return extractTopDockDraft(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return piDraft(lines, pi);
   const rule = locateRuleComposer(lines);
@@ -200,6 +207,8 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
 }
 
 export function stripChrome(lines: StyledLine[]): StyledLine[] {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return stripTopDockChrome(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return lines.slice(0, pi.top);
   const rule = locateRuleComposer(lines);
@@ -209,12 +218,15 @@ export function stripChrome(lines: StyledLine[]): StyledLine[] {
 }
 
 export function hasComposer(lines: StyledLine[]): boolean {
+  if (locateTopDockComposer(lines)) return true;
   if (locatePiComposer(lines)) return true;
   if (locateRuleComposer(lines) !== null) return true;
   return locateGlyphComposer(lines) !== null || hasBoxComposer(lines);
 }
 
 export function composerPrompt(lines: StyledLine[]): string | null {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return topDockComposerPrompt(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return lines.slice(pi.top, pi.bottom + 1).map((line) => line.segments.map((s) => s.text).join("").trimEnd()).join("\n");
   const rule = locateRuleComposer(lines);
@@ -256,9 +268,9 @@ export const ompAdapter: HarnessAdapter = {
   cancelKey: "Escape",
   modalOnScreen: ompModalOnScreen,
   // …and the exact on-screen draft region the destructive pre-clear is bound to on the wire: the
-  // box's bottom prompt row or all of the rule composer's prompt rows. The box scanner declines when
-  // a long palette pushes that row out of range; the rule region ends one status row from the tail.
-  // The answer editor's region is its last answer row, four rows above the tail.
+  // box's bottom prompt row, all of the rule composer's prompt rows, or the top-dock prompt tail. The
+  // box scanner declines when a long palette pushes that row out of range; the rule region ends one
+  // status row from the tail. The answer editor's region is its last answer row, four rows above the tail.
   composerPrompt: (lines) => (hasComposer(lines) ? composerPrompt(lines) : answerEditorPrompt(lines)),
   // The composer inserts a raw newline; the answer editor SUBMITS on one (answer-editor.ts).
   newlineSubmits: (lines) => !hasComposer(lines) && locateAnswerEditor(lines) !== null,

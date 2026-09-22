@@ -214,6 +214,9 @@ export const zh: Dictionary = {
   "settings.display.textSize.label": "字号大小",
   "settings.display.textSize.decrease": "缩小字号",
   "settings.display.textSize.increase": "放大字号",
+  "settings.display.fitWidth.label": "适应窗格宽度",
+  "settings.display.fitWidth.hint":
+    "开启后，镜像会按捕获的终端宽度调整文字大小。关闭后， +/- 按钮使用固定大小。",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "检测到新版本，点击更新",

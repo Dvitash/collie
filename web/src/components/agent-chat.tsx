@@ -23,10 +23,11 @@ import { useChatWindow } from "@/hooks/use-chat-window";
 import { useChatReady } from "@/hooks/use-chat-ready";
 import { usePaneStart } from "@/hooks/use-pane-start";
 import { useHandover, useHeldBody } from "@/hooks/use-handover";
+import { useMirrorFontSize } from "@/hooks/use-mirror-font-size";
+import { useLocale } from "@/hooks/use-locale";
 import { useLatestReply } from "@/hooks/use-latest-reply";
 import { finishedTurnKey, useMirrorImages } from "@/hooks/use-mirror-images";
 import { useStableTerminalDraft } from "@/hooks/use-terminal-draft";
-import { useLocale } from "@/hooks/use-locale";
 import { isConnecting } from "@/lib/connection";
 import { t, type MessageKey } from "@/lib/i18n";
 import { settleAfterSend } from "@/lib/harness/guard";
@@ -262,9 +263,8 @@ export function AgentChat({
 
   const { launchers, home: launchersHome } = useLaunchers(scope);
   // Single display-prefs instance: the View controls (in <Composer>) write it, the mirror reads it.
-  const { prefs, setWrap, stepFontSize, stepChatFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply } =
+  const { prefs, setWrap, setFontSize, setFitWidth, stepChatFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply } =
     useDisplayPrefs();
-  // The chosen terminal font (Settings → Terminal font), applied by re-pointing `--font-mono` on
   // the two mirror surfaces below and NOWHERE else — see mirrorFont() for how, and why it is not a
   // custom property. Scoped to terminal CONTENT on purpose: app chrome that happens to be monospace
   // (the pane index badge, the cwd line) keeps the app's own face. Same boundary MIRROR_SPACE draws.
@@ -466,11 +466,11 @@ export function AgentChat({
     }
   }, [landscape, zen, autoZenActive]);
   const listRef = useRef<ChatMessageListHandle>(null);
+  const [mirrorScrollElement, setMirrorScrollElement] = useState<HTMLElement | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
   // The box the composer's terminal-draft notice floats in (ADR 0061), at the mirror's bottom edge.
   // State rather than a ref: the composer portals into it, so it must re-render once it exists.
   const [draftNoticeSlot, setDraftNoticeSlot] = useState<HTMLDivElement | null>(null);
-
   const gone = !agent;
 
   // Drag the ACTIONS BELT up to bring up the pane switcher, tracked finger-by-finger so the sheet
@@ -674,6 +674,13 @@ export function AgentChat({
     );
   }, [text, revision, logicalText, following]);
   const display = shown.text;
+  const mirrorFontSize = useMirrorFontSize({
+    display,
+    manualFontSize: prefs.fontSize,
+    fitWidth: prefs.fitWidth,
+    scrollElement: mirrorScrollElement,
+    fontFamilyKey: prefs.fontFamily,
+  });
   const hasNew = !following && display !== text;
 
   // The agent's own statusline (model · ctx% · cwd · branch · tokens · permission mode) is stripped
@@ -922,6 +929,11 @@ export function AgentChat({
     !chatFetch || chatStatus.kind !== "empty" || chatFeed.tried || handover.phase !== "idle";
   const chatReadyBody = useChatReady(chatBody, chatAnswered);
   const chatShown = useHeldBody(chatReadyBody, handover.phase);
+  // Fit-to-width measures the TERMINAL mirror's scrollport. `listRef` is shared by both bodies, so
+  // re-read it whenever the body swaps; Chat has no mirror to fit.
+  useLayoutEffect(() => {
+    setMirrorScrollElement(chatShown ? null : (listRef.current?.getScrollElement() ?? null));
+  }, [chatShown]);
   // Why this pane keeps the terminal, in the operator's own terms — and ONLY for the half of that
   // question this side can answer. There are two layers and the split is deliberate: a pane that
   // draws Chat says what it is waiting for in the stream, in its own words, while a pane that keeps
@@ -2227,7 +2239,7 @@ export function AgentChat({
                     text={display}
                     logicalText={shown.logicalText}
                     wrap={prefs.wrap}
-                    fontSize={prefs.fontSize}
+                    fontSize={mirrorFontSize}
                     query={findOpen ? findQuery : ""}
                     currentMatch={findOpen ? currentMatch : -1}
                     onMatchCount={findOpen ? handleMatchCount : undefined}
@@ -2386,7 +2398,7 @@ export function AgentChat({
                     rendersNativeMirror(agent?.agent) ? null : MIRROR_INVERT,
                     mirrorFace.className,
                   )}
-                  style={mirrorFace.style}
+                  style={{ ...mirrorFace.style, fontSize: `${mirrorFontSize}px` }}
                 >
                   {statusLines.map((row, i) => (
                     // Index key: these rows are a positional snapshot of the pane tail, re-derived on
@@ -2592,11 +2604,13 @@ export function AgentChat({
           title={t("composer.controls.display")}
         >
           <DisplayPrefsContent
-            prefs={prefs}
+            // The stepper starts from the size on screen, which fit-to-width may have chosen.
+            prefs={{ ...prefs, fontSize: Math.round(mirrorFontSize) }}
             mirrorNative={mirrorNative}
             setMirrorNative={setMirrorNative}
             setWrap={setWrap}
-            stepFontSize={stepFontSize}
+            stepFontSize={(delta) => setFontSize(Math.round(mirrorFontSize) + delta)}
+            setFitWidth={setFitWidth}
             setRawTerminal={setRawTerminal}
             setTapToFocus={setTapToFocus}
             setExpandClippedReply={setExpandClippedReply}

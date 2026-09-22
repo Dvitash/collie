@@ -10,6 +10,7 @@ import {
   type PollIntent,
   usePolling,
 } from "./use-polling";
+import { beginLongUpload, endLongUpload } from "@/lib/connection-health";
 import { isCatchingUp, resetIdleLock, setLocked } from "@/lib/idle";
 import {
   BURST_MIN_POLLS,
@@ -28,7 +29,10 @@ interface RevalidatorState {
   state: "idle" | "loading";
   revalidate: ReturnType<typeof vi.fn>;
 }
-const rr = vi.hoisted((): RevalidatorState => ({ state: "idle", revalidate: vi.fn() }));
+const rr = vi.hoisted((): RevalidatorState => ({
+  state: "idle",
+  revalidate: vi.fn(() => Promise.resolve()),
+}));
 vi.mock("react-router", () => ({
   useRevalidator: () => ({ state: rr.state, revalidate: rr.revalidate }),
 }));
@@ -90,17 +94,17 @@ function makeData(agents: AgentView[], shellPanes: AgentView[] = []): HomeData {
 // call that may be re-tuned (issue #156), and what must not change is the BEHAVIOUR around them.
 const HOT = HOT_MS;
 
-/** An intent with nothing happening — each test names only what it changes. */
+/** An intent with no burst or topology write — each test names only what it changes. */
 function on(over: Partial<PollIntent> = {}): PollIntent {
-  return { bursting: false, following: true, changed: false, ...over };
+  return { bursting: false, following: true, ...over };
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-// The five rules of the cadence, in the order `intervalFor` applies them. The question they answer
-// together is "is the operator watching something happen", never "is anything happening anywhere".
+// The cadence rules, in the order `intervalFor` applies them. The question is whether the operator
+// is on a live pane, watching the dashboard, or reading backscroll.
 describe("intervalFor", () => {
   const idlePane = makeData([makeAgent("w1:p1", "idle")]);
   const workingPane = makeData([makeAgent("w1:p1", "working")]);
@@ -119,21 +123,18 @@ describe("intervalFor", () => {
     expect(intervalFor(idlePane, "w1:p1", on({ bursting: true, following: false }))).toBe(BURST_MS);
   });
 
-  it("rule 2 — the open, followed pane's own agent is working or blocked", () => {
+  it("rule 2 — any known, followed pane stays hot", () => {
     expect(intervalFor(workingPane, "w1:p1", on())).toBe(HOT);
     expect(intervalFor(blockedPane, "w1:p1", on())).toBe(HOT);
   });
 
-  it("rule 2 does not fire for a BUSY AGENT SOMEWHERE ELSE", () => {
-    // Another workspace's working agent is the notification path's business, not a reason to poll
-    // the pane you are reading at 1.5s — and with a pane open, rule 4 does not answer either.
-    expect(intervalFor(elsewhere, "w1:p1", on())).toBe(IDLE_MS);
+  it("rule 2 — an idle pane stays hot when the operator follows it", () => {
+    // The live tail is active screen time even when the agent and the last ETag read are quiet.
+    expect(intervalFor(elsewhere, "w1:p1", on())).toBe(HOT);
   });
 
-  it("rule 3 — a changed poll keeps a followed pane hot, an unchanged one lets it go", () => {
-    // Covers a plain shell and any harness that publishes no status at all.
-    expect(intervalFor(shell, "w1:s1", on({ changed: true }))).toBe(HOT);
-    expect(intervalFor(shell, "w1:s1", on({ changed: false }))).toBe(IDLE_MS);
+  it("rule 3 — a known, followed shell stays hot without status or ETag changes", () => {
+    expect(intervalFor(shell, "w1:s1", on())).toBe(HOT);
   });
 
   it("rule 4 — the home screen over a busy herd polls at HOME_BUSY_MS", () => {
@@ -154,20 +155,20 @@ describe("intervalFor", () => {
     expect(intervalFor(undefined)).toBe(IDLE_MS);
   });
 
-  it("rule 5 — a scrolled-up pane and a quiet idle pane back off too", () => {
+  it("rule 5 — a scrolled-up pane and a quiet idle pane back off", () => {
     expect(intervalFor(workingPane, "w1:p1", on({ following: false }))).toBe(IDLE_MS);
-    expect(intervalFor(shell, "w1:s1", on({ changed: true, following: false }))).toBe(IDLE_MS);
-    expect(intervalFor(idlePane, "w1:p1", on())).toBe(IDLE_MS);
+    expect(intervalFor(shell, "w1:s1", on({ following: false }))).toBe(IDLE_MS);
+    expect(intervalFor(idlePane, "w1:p1", on({ following: false }))).toBe(IDLE_MS);
   });
 
   it("a pane the snapshot no longer knows about is not 'open'", () => {
-    expect(intervalFor(idlePane, "w99:phantom", on({ changed: true }))).toBe(IDLE_MS);
+    expect(intervalFor(idlePane, "w99:phantom", on())).toBe(IDLE_MS);
   });
 });
 
-// The self-heal: a revalidation wedged in "loading" (a black-holed fetch) would otherwise no-op
-// every future tick, since the fast-path only revalidates while idle. Once it has been loading past
-// SUPERSEDE_MS, a tick kicks a fresh revalidate() to supersede the hung one.
+// The self-heal: a revalidation wedged in "loading" has no normal completion to arm another poll.
+// Once it has been loading past SUPERSEDE_MS, the one-shot watchdog kicks a fresh revalidate() to
+// supersede the hung one.
 describe("usePolling — superseding a wedged revalidation", () => {
   // The hot scenario, stated the way the cadence states it: the operator is on this pane, pinned to
   // its tail (the store's default), and its own agent is working. That is rule 2 → HOT_MS.
@@ -177,64 +178,32 @@ describe("usePolling — superseding a wedged revalidation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     rr.state = "idle";
-    rr.revalidate.mockClear();
+    rr.revalidate.mockReset();
+    rr.revalidate.mockResolvedValue(undefined);
     resetPollIntent();
   });
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("does NOT revalidate on a tick before SUPERSEDE_MS has elapsed", () => {
+  it("does NOT revalidate before the SUPERSEDE_MS watchdog fires", () => {
     rr.state = "loading"; // stuck loading from the very first render
     renderHook(() => usePolling(hotData(), HOT_PANE));
-    vi.advanceTimersByTime(SUPERSEDE_MS - 1); // several HOT ticks, all still within the grace window
+    vi.advanceTimersByTime(SUPERSEDE_MS - 1);
     expect(rr.revalidate).not.toHaveBeenCalled();
   });
 
-  it("DOES revalidate once a load has been stuck past SUPERSEDE_MS", () => {
+  it("DOES revalidate once the SUPERSEDE_MS watchdog fires", () => {
     rr.state = "loading";
     renderHook(() => usePolling(hotData(), HOT_PANE));
-    vi.advanceTimersByTime(SUPERSEDE_MS); // a tick now sees the load has aged past the threshold
+    vi.advanceTimersByTime(SUPERSEDE_MS);
     expect(rr.revalidate).toHaveBeenCalled();
   });
 
-  // The gap between ticks is what an operator waits for after a key tap, so it is pinned to the
-  // constant exactly: nothing before HOT_MS, one revalidation at HOT_MS, one more each HOT_MS after.
-  it("ticks at exactly HOT_MS while the followed pane's agent works", () => {
+  it("starts the visible cadence when the revalidator is idle", () => {
     rr.state = "idle";
     renderHook(() => usePolling(hotData(), HOT_PANE));
-
-    vi.advanceTimersByTime(HOT_MS - 1);
-    expect(rr.revalidate).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(rr.revalidate).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(HOT_MS * 3);
-    expect(rr.revalidate).toHaveBeenCalledTimes(4);
-  });
-
-  // Cooling: the open pane's agent goes idle and its mirror is not moving, so the gap opens to
-  // IDLE_MS. The hot gap must buy nothing there — no tick until the full idle interval has passed.
-  it("ticks at exactly IDLE_MS once the open pane goes quiet, and re-arms the hot gap when it works again", () => {
-    rr.state = "idle";
-    const { rerender } = renderHook(({ data }: { data: HomeData }) => usePolling(data, HOT_PANE), {
-      initialProps: { data: makeData([makeAgent(HOT_PANE, "idle")]) },
-    });
-
     vi.advanceTimersByTime(HOT_MS);
-    expect(rr.revalidate).not.toHaveBeenCalled(); // quiet: the hot gap is not enough
-    vi.advanceTimersByTime(IDLE_MS - HOT_MS);
-    expect(rr.revalidate).toHaveBeenCalledTimes(1);
-
-    rr.revalidate.mockClear();
-    act(() => rerender({ data: hotData() })); // the agent starts working — back to the hot gap
-    vi.advanceTimersByTime(HOT_MS);
-    expect(rr.revalidate).toHaveBeenCalledTimes(1);
-  });
-
-  it("still uses the plain idle fast-path when not loading", () => {
-    rr.state = "idle";
-    renderHook(() => usePolling(hotData(), HOT_PANE));
-    vi.advanceTimersByTime(HOT_MS); // one HOT tick
     expect(rr.revalidate).toHaveBeenCalled();
   });
 
@@ -307,6 +276,102 @@ describe("usePolling — superseding a wedged revalidation", () => {
   });
 });
 
+describe("usePolling — completion-driven scheduling", () => {
+  const HOT_PANE = "w1:p1";
+  const hotData = () => makeData([makeAgent(HOT_PANE, "working")]);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    rr.state = "idle";
+    rr.revalidate.mockReset();
+    rr.revalidate.mockResolvedValue(undefined);
+    resetPollIntent();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    resetPollIntent();
+  });
+
+  it("waits for a revalidation to settle before the next 1ms hot poll", async () => {
+    let resolve!: () => void;
+    const request = new Promise<void>((done) => {
+      resolve = done;
+    });
+    rr.revalidate.mockReturnValue(request);
+    renderHook(() => usePolling(hotData(), HOT_PANE));
+
+    act(() => vi.advanceTimersByTime(HOT_MS));
+    expect(rr.revalidate).toHaveBeenCalledTimes(1);
+
+    act(() => vi.advanceTimersByTime(HOT_MS * 100));
+    expect(rr.revalidate).toHaveBeenCalledTimes(1);
+
+    act(() => resolve());
+    await act(async () => {
+      await request;
+    });
+
+    act(() => vi.advanceTimersByTime(HOT_MS - 1));
+    expect(rr.revalidate).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(rr.revalidate).toHaveBeenCalledTimes(2);
+  });
+
+  it("backs off a rejected hot poll instead of retrying at 1ms", async () => {
+    let reject!: (error: Error) => void;
+    const request = new Promise<void>((_resolve, fail) => {
+      reject = fail;
+    });
+    rr.revalidate.mockReturnValue(request);
+    renderHook(() => usePolling(hotData(), HOT_PANE));
+
+    act(() => vi.advanceTimersByTime(HOT_MS));
+    expect(rr.revalidate).toHaveBeenCalledTimes(1);
+    act(() => reject(new Error("offline")));
+    await act(async () => {
+      await request.catch(() => undefined);
+    });
+
+    act(() => vi.advanceTimersByTime(IDLE_MS - 1));
+    expect(rr.revalidate).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(rr.revalidate).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retain a timer while hidden or while a long upload is active", () => {
+    const hidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    const { unmount } = renderHook(() => usePolling(hotData(), HOT_PANE));
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+      act(() => vi.advanceTimersByTime(HOT_MS * 100));
+      expect(rr.revalidate).not.toHaveBeenCalled();
+    } finally {
+      if (hidden) Object.defineProperty(document, "hidden", hidden);
+      else Reflect.deleteProperty(document, "hidden");
+    }
+
+    act(() => beginLongUpload());
+    try {
+      expect(vi.getTimerCount()).toBe(0);
+      act(() => vi.advanceTimersByTime(HOT_MS * 100));
+      expect(rr.revalidate).not.toHaveBeenCalled();
+    } finally {
+      act(() => endLongUpload());
+      unmount();
+    }
+  });
+
+  it("cleans the pending timer on unmount", () => {
+    const { unmount } = renderHook(() => usePolling(hotData(), HOT_PANE));
+    expect(vi.getTimerCount()).toBe(1);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(HOT_MS * 2));
+    expect(rr.revalidate).not.toHaveBeenCalled();
+  });
+});
+
 
 // The hook half: the intent is read from lib/poll-intent, and a send must not have to wait out a
 // gap that was timed for an idle pane.
@@ -316,7 +381,8 @@ describe("usePolling — bursts and the follow intent", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     rr.state = "idle";
-    rr.revalidate.mockClear();
+    rr.revalidate.mockReset();
+    rr.revalidate.mockResolvedValue(undefined);
     resetPollIntent();
   });
   afterEach(() => {
@@ -324,8 +390,8 @@ describe("usePolling — bursts and the follow intent", () => {
     resetPollIntent();
   });
 
-  it("backs off to IDLE_MS on a quiet open pane", () => {
-    renderHook(() => usePolling(openPane(), "w1:p1"));
+  it("backs off to IDLE_MS on a scrolled-up pane", () => {
+    renderHook(() => usePolling(openPane(), "w1:p1", undefined, false));
     vi.advanceTimersByTime(IDLE_MS - 1);
     expect(rr.revalidate).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
@@ -343,8 +409,8 @@ describe("usePolling — bursts and the follow intent", () => {
   });
 
   it("reschedules from the tap — a send never waits out the old gap", () => {
-    renderHook(() => usePolling(openPane(), "w1:p1"));
-    // Most of the way through a 6s idle gap…
+    renderHook(() => usePolling(openPane(), "w1:p1", undefined, false));
+    // Most of the way through the idle gap…
     vi.advanceTimersByTime(IDLE_MS - 1000);
     expect(rr.revalidate).not.toHaveBeenCalled();
     // …the operator taps a key. The next poll is BURST_MS from HERE, not 1000ms from here.
@@ -356,25 +422,29 @@ describe("usePolling — bursts and the follow intent", () => {
   it("restarts the burst gap on a second send inside the burst", () => {
     renderHook(() => usePolling(openPane(), "w1:p1"));
     act(() => stampSend("w1:p1"));
-    vi.advanceTimersByTime(BURST_MS - 100); // 100ms short of the poll this send bought
+    vi.advanceTimersByTime(BURST_MS - 1); // one millisecond short of the poll this send bought
     act(() => stampSend("w1:p1")); // a second tap: the gap starts over
-    vi.advanceTimersByTime(99);
+    vi.advanceTimersByTime(BURST_MS - 1);
     expect(rr.revalidate).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(BURST_MS - 99);
+    vi.advanceTimersByTime(1);
     expect(rr.revalidate).toHaveBeenCalledTimes(1);
   });
 
-  it("lets the burst go after its quiet polls and returns to the idle gap", () => {
-    const { rerender } = renderHook(() => usePolling(openPane(), "w1:p1"));
+  it("lets the burst go after its quiet polls and returns to the idle gap", async () => {
+    const { rerender } = renderHook(() => usePolling(openPane(), "w1:p1", undefined, false));
     act(() => stampSend("w1:p1"));
     act(() => {
       for (let i = 0; i < 5; i += 1) markPollResult(false); // BURST_MIN_POLLS quiet reads
     });
     rerender();
     rr.revalidate.mockClear();
-    vi.advanceTimersByTime(BURST_MS * 4);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(BURST_MS * 4);
+    });
     expect(rr.revalidate).not.toHaveBeenCalled(); // back on the slow gap
-    vi.advanceTimersByTime(IDLE_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+    });
     expect(rr.revalidate).toHaveBeenCalledTimes(1);
   });
 
@@ -404,24 +474,26 @@ describe("usePolling — bursts and the follow intent", () => {
     expect(rr.revalidate).toHaveBeenCalledTimes(1);
   });
 
-  it("the topology burst spends itself after BURST_MIN_POLLS polls and backs off", () => {
+  it("the topology burst spends itself after BURST_MIN_POLLS polls and backs off", async () => {
     renderHook(() => usePolling(openPane(), null));
     act(() => stampTopology());
-    // Run through the burst's own budget of fast polls. Each advance is its own `act` so the state
-    // update the tick makes (consumeTopologyPoll) is flushed and the interval rescheduled — a tick
-    // fires from inside the effect's own setInterval callback, not from test code, so nothing else
-    // would flush it between iterations.
+    // Each tick updates (consumeTopologyPoll), then the scheduler re-arms its completion-driven
+    // timeout; nothing spins while a read is loading.
     for (let i = 0; i < BURST_MIN_POLLS; i += 1) {
-      act(() => {
-        vi.advanceTimersByTime(BURST_MS);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(BURST_MS);
       });
     }
     expect(rr.revalidate).toHaveBeenCalledTimes(BURST_MIN_POLLS);
     rr.revalidate.mockClear();
     // Spent — the herd is idle and no pane is open, so the gap is back to IDLE_MS.
-    vi.advanceTimersByTime(BURST_MS * 4);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(BURST_MS * 4);
+    });
     expect(rr.revalidate).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(IDLE_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+    });
     expect(rr.revalidate).toHaveBeenCalledTimes(1);
   });
 
@@ -473,7 +545,7 @@ describe("an update in flight is the fastest thing on the screen it is on", () =
 
   it("a run somebody is still driving polls at HOT_MS, on a page with no pane and an idle herd", () => {
     // Measured on 2026-09-08: `/settings/updates` opens no pane, so with an idle herd this page fell
-    // to rule 5 and polled every six seconds for the whole update. The one screen where the operator
+    // to rule 5 and polled at the idle cadence for the whole update. The one screen where the operator
     // is provably watching something happen was the slowest screen in the app.
     for (const state of ["preflight", "staging", "restarting", "verifying"] as const) {
       expect(intervalFor(withRun({ run: run(state) }), null)).toBe(HOT_MS);
@@ -489,7 +561,7 @@ describe("an update in flight is the fastest thing on the screen it is on", () =
 
   it("a PEERS-ONLY run counts too, and it has no local record at all (M20/09)", () => {
     // "Retry crew update" writes nothing to `update.json`, so a rule that read only `run` would poll
-    // that whole run at six seconds.
+    // that whole run at the idle cadence.
     expect(intervalFor(withRun({ peers: [{ name: "minibuch", state: "updating" }] }), null)).toBe(HOT_MS);
     // And it stops when the lead says the run settled, not when a timer says so.
     expect(
@@ -504,6 +576,6 @@ describe("an update in flight is the fastest thing on the screen it is on", () =
     // The rule sits BELOW the pane rules on purpose: a page left open on Updates must not out-argue
     // a mirror somebody is reading.
     const data = withRun({ run: run("staging") });
-    expect(intervalFor(data, "w1:p1", { bursting: true, following: true, changed: false })).toBe(BURST_MS);
+    expect(intervalFor(data, "w1:p1", { bursting: true, following: true })).toBe(BURST_MS);
   });
 });

@@ -10,6 +10,7 @@ import type { DisplayPrefs } from "@/hooks/use-display-prefs";
 const PREFS: DisplayPrefs = {
   wrap: true,
   fontSize: 10,
+  fitWidth: true,
   draftFontSize: 14,
   chatFontSize: 14,
   fontFamily: "system",
@@ -28,6 +29,7 @@ function draw(paneView?: Partial<PaneViewControl>) {
       prefs={PREFS}
       setWrap={vi.fn()}
       stepFontSize={stepFontSize}
+      setFitWidth={vi.fn()}
       setRawTerminal={vi.fn()}
       setTapToFocus={vi.fn()}
       mirrorNative={false}

@@ -2,7 +2,8 @@ import { AArrowDown, AArrowUp, ChevronDown, Type } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { MIRROR_INVERT, MIRROR_SPACE } from "@/components/mirror-space";
+import { Switch } from "@/components/ui/switch";
+import { MIRROR_SPACE, MIRROR_INVERT } from "@/components/mirror-space";
 import {
   DRAFT_FONT_MAX,
   DRAFT_FONT_MIN,
@@ -57,10 +58,9 @@ const FAMILY_LABELS = {
 // entry has been lost from the stack — which is the one way this control can break the mirror.
 const SAMPLE = "~/collie  0O1lI │ ok";
 
-/** Settings card: the terminal mirror's font family and size. Device-local, like every display pref. */
 export function FontSettingsControl() {
   useLocale();
-  const { prefs, setFontFamily, stepFontSize, stepDraftFontSize } = useDisplayPrefs();
+  const { prefs, setFontFamily, setFitWidth, stepFontSize, stepDraftFontSize } = useDisplayPrefs();
 
   const sampleFace = mirrorFont(prefs.fontFamily);
 
@@ -110,6 +110,20 @@ export function FontSettingsControl() {
           </div>
         </div>
 
+        <div className="flex items-start justify-between gap-4 px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">{t("settings.display.fitWidth.label")}</div>
+            <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+              {t("settings.display.fitWidth.hint")}
+            </p>
+          </div>
+          <Switch
+            id="pref-font-fit-width"
+            checked={prefs.fitWidth}
+            onCheckedChange={setFitWidth}
+            aria-label={t("settings.display.fitWidth.label")}
+          />
+        </div>
         <div className="flex items-center justify-between gap-4 px-4 py-3">
           <div className="text-sm font-medium">{t("settings.fonts.size")}</div>
           <div className="flex shrink-0 items-center gap-1">

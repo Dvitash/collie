@@ -23,6 +23,15 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+### Changed
+
+- **Visible, followed chats schedule their next refresh 1 ms after completion.** Requests stay single-flight, including when an idle pane is open; browser timers, network and rendering determine the actual rate. Busy dashboards refresh every second, idle views and scrolled-back chats every 1.5 seconds, and hidden tabs pause.
+- **Terminal text fits the phone's available width.** Automatic sizing follows captured columns and viewport changes within the 9–16 px size limits. Display → Fit text to pane toggles it; manual size controls opt out, and existing non-default size preferences remain fixed.
+
+### Fixed
+
+- **OMP's custom Top Dock composer accepts guarded replies.** The borderless input is recognized by its two adjacent, fully background-painted status rows and prompt tail. Wrapped drafts are verified before submission, while model pickers, settings, and approval dialogs remain blocked.
+
 ## [1.17.2] - 2026-10-06
 
 ### Fixed

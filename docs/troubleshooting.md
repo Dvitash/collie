@@ -74,6 +74,23 @@ custom domain, or a proxy that rewrites `Host`. Allow the exact public origin wi
 the fourth proxy requirement in
 [`docs/deployment.md`](deployment.md#variant-b--identity-aware-proxy--per-device-authorisation).
 
+**OMP says its input box is not on screen, but the prompt is visible.** The custom Top Dock
+layout uses two background-painted status rows above a borderless `❯` prompt. This fork recognizes
+that layout, including wrapped drafts; rebuild the fork and reload the PWA if it still has the old
+detector. Model/settings/approval dialogs are intentionally blocked. Do not use the second-send
+override to work around an unknown layout: it may type into a dialog.
+
+**The mirror refreshes slowly.** Visible, followed chats schedule the next poll 1 ms after the
+previous revalidation completes, including idle panes. Browser timer limits, network latency and
+rendering determine the actual rate; requests do not overlap. Busy dashboards wait one second,
+idle views and scrolled-back chats 1.5 seconds, and hidden tabs do not poll. Terminal reads are live
+and do not wait for the bridge's separate snapshot timer.
+
+**Terminal text leaves a gap on the right.** Display → Fit text to pane automatically fits captured
+columns to the available width, within the 9–16 px font limits. It is enabled by default, but existing
+non-default text-size choices remain fixed. Enable it to replace a fixed size; the size buttons
+switch back to manual sizing.
+
 **A `sudo` (or SSH passphrase, or `gpg`) prompt won't take your reply.** Use **Type** in the
 actions row above the keyboard, not Send. Send *verifies* what it typed by reading it back off the screen before it
 presses Enter ([#34](https://github.com/AltanS/collie/issues/34)), and a password prompt turns echo
