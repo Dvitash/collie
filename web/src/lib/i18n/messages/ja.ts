@@ -196,6 +196,9 @@ export const ja: Dictionary = {
   "settings.display.textSize.label": "文字サイズ",
   "settings.display.textSize.decrease": "文字サイズを縮小",
   "settings.display.textSize.increase": "文字サイズを拡大",
+  "settings.display.fitWidth.label": "ペイン幅に合わせる",
+  "settings.display.fitWidth.hint":
+    "オンにすると、ミラーの文字サイズを取得したターミナル幅に合わせます。オフでは +/- で固定サイズを使います。",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "新しいビルドがあります。タップして更新",

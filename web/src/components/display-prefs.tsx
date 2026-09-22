@@ -24,6 +24,7 @@ interface DisplayPrefsContentProps {
   prefs: DisplayPrefs;
   setWrap: (wrap: boolean) => void;
   stepFontSize: (delta: number) => void;
+  setFitWidth: (fitWidth: boolean) => void;
   setRawTerminal: (raw: boolean) => void;
   setTapToFocus: (tapToFocus: boolean) => void;
   /** Effective native rendering for THIS pane: the agent bit from .adr/0047 as overridden by the
@@ -65,6 +66,7 @@ export function DisplayPrefsContent({
   prefs,
   setWrap,
   stepFontSize,
+  setFitWidth,
   setRawTerminal,
   setTapToFocus,
   mirrorNative,
@@ -84,6 +86,19 @@ export function DisplayPrefsContent({
             checked={prefs.wrap}
             onCheckedChange={setWrap}
             aria-label={t("settings.display.wrap.label")}
+          />
+        }
+      />
+      <Row
+        label={t("settings.display.fitWidth.label")}
+        hint={t("settings.display.fitWidth.hint")}
+        htmlFor="pref-fit-width"
+        control={
+          <Switch
+            id="pref-fit-width"
+            checked={prefs.fitWidth}
+            onCheckedChange={setFitWidth}
+            aria-label={t("settings.display.fitWidth.label")}
           />
         }
       />

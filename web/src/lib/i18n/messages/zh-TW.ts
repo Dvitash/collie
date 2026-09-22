@@ -185,6 +185,9 @@ export const zhTW: Dictionary = {
   "settings.display.textSize.label": "字級大小",
   "settings.display.textSize.decrease": "縮小字級",
   "settings.display.textSize.increase": "放大字級",
+  "settings.display.fitWidth.label": "配合窗格寬度",
+  "settings.display.fitWidth.hint":
+    "開啟時，鏡像會依擷取的終端機寬度調整字級。關閉時， +/- 按鈕會使用固定字級。",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "偵測到新版本，點擊更新",

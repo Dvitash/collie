@@ -2,14 +2,13 @@ import { useEffect, useRef } from "react";
 import { useRevalidator } from "react-router";
 
 import { refreshNow } from "@/lib/api";
-import { isLongUpload } from "@/lib/connection-health";
+import { isLongUpload, useLongUpload } from "@/lib/connection-health";
 import { beginCatchUp, endCatchUp, isLocked, useLocked } from "@/lib/idle";
 import {
   burstAppliesTo,
   consumeTopologyPoll,
   useBurstPaneId,
   useFollowing,
-  useLastPollChanged,
   useSendCount,
   useTopologyBursting,
 } from "@/lib/poll-intent";
@@ -17,14 +16,18 @@ import type { HomeData } from "@/lib/loaders";
 import { crewMoving, runInFlight } from "@/lib/update-ribbon";
 import type { Scope } from "@/lib/scope";
 
-// Adaptive polling, the React Router way: a timer that calls `revalidator.revalidate()`, which
+// Adaptive polling, the React Router way: a timer starts `revalidator.revalidate()`, which
 // re-runs every active loader (snapshot + the open pane) — our equivalent of a refetch interval.
+// The timer is completion-driven rather than an interval: `revalidate()` returns a promise that
+// settles when React Router's revalidation settles, and only then do we arm the next timer. That
+// matters for the 1ms visible cadence — a millisecond interval would otherwise spin while a fetch
+// is in flight.
+//
 //  - the gap is resolved from what the OPERATOR is doing, not from what the herd is doing: a burst
-//    right after a send, a fast gap while they follow something that is moving, a slow one when
-//    nothing says anybody is watching (see `intervalFor` for the five rules);
-//  - skipped only while the tab is hidden (battery); it deliberately does NOT gate on
-//    navigator.onLine (that flag lies on some phones and would wedge polling forever — see the tick),
-//    and it's kicked immediately on focus/online/visibility as an accelerator.
+//    right after a send, a fast gap while they follow a known pane at its live tail, a slow one when
+//    they are on the dashboard or scrolled back (see `intervalFor` for the ordered rules);
+//  - skipped while the tab is hidden, idle-locked, or carrying a long upload (battery/uplink);
+//    focus/online/visibility and the upload's reactive store wake it back up.
 //
 // WHY IT IS SHAPED THIS WAY (#156). The cadence used to be one dial with two positions — 1.5s while
 // anything anywhere was working or a pane was open, 4s otherwise — and both positions were a guess
@@ -39,18 +42,17 @@ import type { Scope } from "@/lib/scope";
 /** The gap during a burst — the few beats after a send, while the operator is watching their own
  *  keystroke land. Short enough that a key reads as immediate; spent only on the open pane, and only
  *  for the handful of polls the burst rules allow (lib/poll-intent.ts). */
-export const BURST_MS = 300;
-/** The gap while the operator follows a pane that has something to show — its agent is working, or
- *  its mirror moved on the last poll. */
-export const HOT_MS = 1500;
+export const BURST_MS = 1;
+/** The gap while the operator follows a known pane at its live tail. */
+export const HOT_MS = 1;
 /** The home screen while an agent somewhere is working or blocked. Nobody is on a mirror, so there
  *  is nothing to keep smooth; the herd's row still has to reflect a status change without feeling
  *  stuck. */
-export const HOME_BUSY_MS = 4000;
-/** The gap when nothing says anybody is watching: a home screen over an idle herd, a pane scrolled
- *  back into history, a pane whose agent is idle and whose mirror has stopped moving. SLOWER than
- *  the old resting gap on purpose — that is the half of the trade that pays for the burst. */
-export const IDLE_MS = 6000;
+export const HOME_BUSY_MS = 1000;
+/** The gap when nothing says anybody is watching: the dashboard is quiet or a pane is scrolled back.
+ *  Short enough to notice a newly interesting pane promptly; bursts and topology writes still get
+ *  the 1ms path. */
+export const IDLE_MS = 1500;
 
 /**
  * Everything the cadence needs that the snapshot cannot tell us, as plain values.
@@ -63,39 +65,37 @@ export interface PollIntent {
   bursting: boolean;
   /** The pane view is pinned to the live tail. True when no pane is open. */
   following: boolean;
-  /** The last pane read came back with new content (a 200 with a body we hadn't seen) rather than
-   *  an ETag hit. */
-  changed: boolean;
   /** A create or a close just went through and hasn't yet spent its catch-up polls — see
    *  `lib/poll-intent.ts` → `stampTopology`. Unlike `bursting`, this applies wherever the operator
    *  is looking, not only on the pane a send went to. */
   topologyBursting?: boolean;
 }
 
-// Self-heal a wedged revalidation. Normally a tick no-ops while one is already in flight (see the
-// idle fast-path below), but a black-holed fetch can stay `loading` forever (its timeout aside — the
-// timer itself can freeze while the phone sleeps). Once a revalidation has been loading for longer
-// than this — just past GET_TIMEOUT_MS (10s) as a belt-and-braces margin — a tick kicks a fresh
+// Self-heal a wedged revalidation. A normal poll waits for its returned promise rather than ticking
+// while loading, but a black-holed fetch can stay `loading` forever (its timeout aside — the timer
+// itself can freeze while the phone sleeps). Once a revalidation has been loading for longer than
+// this — just past GET_TIMEOUT_MS (10s) as a belt-and-braces margin — a watchdog kicks a fresh
 // revalidate() anyway: React Router aborts/supersedes the hung one (loaders treat that AbortError as
-// "superseded"). We compare against wall-clock (Date.now), not a timer, precisely because timers can
-// stop advancing during sleep — the age we care about is real elapsed time since the load began.
+// "superseded"). We compare against wall-clock (Date.now), not a polling interval, precisely because
+// timers can stop advancing during sleep — the age we care about is real elapsed time since the load
+// began.
 export const SUPERSEDE_MS = 12_000;
 
 /**
  * Pure cadence resolver — exported so it can be unit-tested in isolation.
  *
  * The question is not "is anything happening anywhere" but "is the operator watching something
- * happen", answered in five rules, in order:
+ * happen", answered by ordered rules:
+ *   0. a topology burst → BURST_MS;
  *   1. a burst is running on the open pane → BURST_MS;
- *   2. the open pane is followed and its own agent is working/blocked → HOT_MS;
- *   3. the open pane is followed and the last poll brought new content → HOT_MS;
- *   3b. an update run on this machine, or a crew run on its peers, is still moving → HOT_MS;
+ *   2. a known pane is open and followed at its live tail → HOT_MS;
+ *   3. an update run on this machine, or a crew run on its peers, is still moving → HOT_MS;
  *   4. no pane is open and some agent in the herd is working/blocked → HOME_BUSY_MS;
  *   5. otherwise → IDLE_MS.
- * Being hidden is not a rule here: the tick already refuses to fetch behind a hidden tab.
+ * Being hidden is not a rule here: the scheduler refuses to fetch behind a hidden tab.
  *
  * `intent` is optional so a caller that only wants the herd-shaped answer (rules 4 and 5) can ask
- * without holding the store; an absent intent simply reads as no burst, not following, unchanged.
+ * without holding the store; an absent intent simply reads as no burst and not following.
  */
 export function intervalFor(
   data: HomeData | undefined,
@@ -108,17 +108,14 @@ export function intervalFor(
   // 1. A send just happened on the pane you are looking at: watch it land.
   if (intent?.bursting) return BURST_MS;
 
-  // 2 and 3. You are on a pane, pinned to its tail, and it has something to show — either its agent
-  // says so, or the mirror itself moved on the last poll. The second half is what covers a plain
-  // shell and any harness that publishes no status: "the screen is still changing" needs no adapter.
-  if (paneId && intent?.following && paneIsOpen(data, paneId)) {
-    if (openPaneWorking(data, paneId)) return HOT_MS;
-    if (intent.changed) return HOT_MS;
-  }
+  // 2. A known pane that the operator follows is active screen time even when its agent is idle and
+  // its last poll was unchanged. The live tail is the signal; status and ETag changes must not make
+  // the visible pane wait on the dashboard cadence.
+  if (paneId && intent?.following && paneIsOpen(data, paneId)) return HOT_MS;
 
-  // 3b. AN UPDATE IS RUNNING ON THIS MACHINE (M20/08). Measured on 2026-09-08: `/settings/updates`
-  // opens no pane, so with an idle herd this fell through to rule 5 and polled the snapshot every
-  // six seconds for the whole update — over a run whose four sentences already change perhaps four
+  // 3. AN UPDATE IS RUNNING ON THIS MACHINE (M20/08). Measured on 2026-09-08: `/settings/updates`
+  // opens no pane, so with an idle herd this fell through to rule 5 and polled the snapshot at the
+  // idle cadence for the whole update — over a run whose four sentences already change perhaps four
   // times in as many minutes. The one screen where the operator is provably watching something
   // happen was the slowest screen in the app.
   //
@@ -145,17 +142,6 @@ function herdBusy(data: HomeData | undefined): boolean {
 function paneIsOpen(data: HomeData | undefined, paneId: string): boolean {
   const allPanes = [...(data?.agents ?? []), ...(data?.shellPanes ?? [])];
   return allPanes.some((p) => p.paneId === paneId);
-}
-
-/** Whether the OPEN pane's own agent is working or blocked. Deliberately not "any agent in the
- *  herd": under this cadence the question is what the operator is looking at, and another
- *  workspace's busy agent is answered by the notification path, not by polling faster. */
-function openPaneWorking(data: HomeData | undefined, paneId: string): boolean {
-  return (
-    data?.agents.some(
-      (a) => a.paneId === paneId && (a.status === "working" || a.status === "blocked"),
-    ) ?? false
-  );
 }
 
 /**
@@ -185,18 +171,18 @@ export function usePolling(
   following?: boolean,
 ): number {
   const revalidator = useRevalidator();
-  // Held in a ref for the same reason the revalidator is: the tick effect must not re-subscribe
-  // every time the viewed host or session changes identity.
+  // Held in a ref for the same reason the revalidator is: the scheduler callbacks must not
+  // re-subscribe every time the viewed host or session changes identity.
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
-  // Hold the revalidator in a ref so the effect only re-subscribes when the cadence changes,
+  // Hold the revalidator in a ref so the scheduler only re-subscribes when the cadence changes,
   // not on every revalidation (its identity flips each cycle).
   const ref = useRef(revalidator);
   ref.current = revalidator;
 
   // Wall-clock timestamp of when the current revalidation began, or null when idle. Stamped on the
-  // idle→loading edge and cleared on →idle, so a tick can tell how long a load has been in flight
-  // (used to detect and supersede a wedged one). A ref, not state — it must not trigger re-renders.
+  // idle→loading edge and cleared on →idle, so the watchdog can tell how long a load has been in
+  // flight. A ref, not state — it must not trigger re-renders.
   const loadingSince = useRef<number | null>(null);
   if (revalidator.state === "loading") {
     if (loadingSince.current === null) loadingSince.current = Date.now();
@@ -204,25 +190,36 @@ export function usePolling(
     loadingSince.current = null;
   }
 
+  // A request can start before React has rendered the router's loading state. Keep this guard
+  // separate from `revalidator.state` so focus, visibility, and send wakes cannot start a second
+  // normal revalidation in that render-sized window.
+  const pollInFlight = useRef(false);
+  const pendingRequest = useRef<Promise<void> | null>(null);
+  const scheduler = useRef<{
+    wake: () => void;
+    onState: () => void;
+    onSettled: () => void;
+  } | null>(null);
+  const wakeAfterRelease = useRef(false);
+  // A rejected/aborted revalidation must not immediately re-enter the 1ms hot path while the root
+  // is disconnected. Its next attempt uses at least the existing IDLE_MS cadence, then a success
+  // clears this flag and returns to the visible target.
+  const retrySlowly = useRef(false);
+
   // The cadence's inputs, read from the store the composer and the pane loader write to.
   const burstPane = useBurstPaneId();
   const storeFollowing = useFollowing();
-  const changed = useLastPollChanged();
   const sendKick = useSendCount();
   const topoBursting = useTopologyBursting();
+  const longUpload = useLongUpload();
   const ms = intervalFor(data, paneId, {
     bursting: burstAppliesTo(burstPane, paneId),
     // The caller may own the flag directly (the tests do); otherwise the pane view's own follow
     // intent, published to lib/poll-intent, answers — and it is true whenever no pane is open.
     following: following ?? storeFollowing,
-    changed,
     topologyBursting: topoBursting,
   });
 
-  // Resuming from the idle lock must refetch AT ONCE. The route tree stays mounted through a pause
-  // (see App), so unlocking re-runs no loaders by itself — without this the first thing you'd see on
-  // resume is however stale the snapshot got while paused, for up to one full interval. Fires on the
-  // falling edge only; `wasLocked` seeds from the current value so mounting never counts as a release.
   const locked = useLocked();
   const wasLocked = useRef(locked);
   useEffect(() => {
@@ -231,7 +228,10 @@ export function usePolling(
     if (!released) return;
     beginCatchUp(); // holds the cover through the refetch — see the settle effect below
     lookNow(scopeRef.current);
-    if (ref.current.state === "idle") ref.current.revalidate();
+    // The scheduler owns the in-flight guard and promise completion. If React is replacing its
+    // effect during this release, leave a one-shot wake for the new scheduler setup.
+    if (scheduler.current) scheduler.current.wake();
+    else wakeAfterRelease.current = true;
   }, [locked]);
 
   // End the catch-up beat when the revalidator comes to rest. Keyed on the state itself, so it can't
@@ -242,61 +242,194 @@ export function usePolling(
   }, [revalidator.state]);
 
   useEffect(() => {
-    const tick = () => {
-      if (document.hidden) return;
-      // Idle-locked: the app is covered and nobody is reading it, so don't keep hitting the socket.
-      // A live read (not a captured render value) because this fires from an interval — and unlike
-      // the `navigator.onLine` trap below, this flag can't lie: it's set by our own lock, and
-      // resuming re-runs every loader, so a pause can't strand the UI on stale data.
-      if (isLocked()) return;
-      // A long upload the operator started (a voice clip) is on the wire. A phone's uplink is the
-      // narrow half of a mobile link, so a poll fired now does not arrive sooner — it queues behind
-      // the audio and makes the audio slower. Skipped, not cancelled: the upload ends in seconds,
-      // releasing it stamps a wake, and the very next tick reads a fresh snapshot.
-      if (isLongUpload()) return;
-      // Deliberately NO navigator.onLine gate here. On some phones the flag lies — it stuck FALSE
-      // after an airplane-mode toggle even though the network was back — and gating the tick on it
-      // wedged polling permanently: the app froze on "not connected" with a resting/bad-state dog and
-      // a stale mirror forever, because it never fetched again to discover the network had returned. A
-      // failed fetch on a genuinely dead connection is cheap and self-heals the instant it's back; the
-      // focus/online/visibility listeners below only accelerate that first beat. Never STOP fetching
-      // because a possibly-lying flag says offline.
-      const r = ref.current;
-      if (r.state === "idle") {
-        consumeTopologyPoll();
-        r.revalidate();
+    let disposed = false;
+    let timer: number | null = null;
+    let watchdog: number | null = null;
+
+    const blocked = (): boolean => document.hidden || isLocked() || isLongUpload();
+    const clearTimer = (): void => {
+      if (timer === null) return;
+      window.clearTimeout(timer);
+      timer = null;
+    };
+    const clearWatchdog = (): void => {
+      if (watchdog === null) return;
+      window.clearTimeout(watchdog);
+      watchdog = null;
+    };
+    const stopTimers = (): void => {
+      clearTimer();
+      clearWatchdog();
+    };
+    const retryDelay = (): number => Math.max(ms, IDLE_MS);
+
+    const schedule = (delay = retrySlowly.current ? retryDelay() : ms): void => {
+      if (disposed || blocked() || timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        tick();
+      }, delay);
+    };
+
+    const onSettled = (): void => {
+      clearWatchdog();
+      if (ref.current.state === "idle") loadingSince.current = null;
+      if (disposed) return;
+      if (ref.current.state === "idle") {
+        schedule(retrySlowly.current ? retryDelay() : ms);
+      } else if (!blocked()) {
+        armWatchdog();
+      }
+    };
+
+    const finish = (request: Promise<void> | null, failed: boolean): void => {
+      if (request !== null) {
+        if (pendingRequest.current !== request) return;
+        pendingRequest.current = null;
+      } else if (pendingRequest.current !== null) {
         return;
       }
-      // Already loading: normally we leave it be, but a revalidation stuck past SUPERSEDE_MS is
-      // almost certainly a black-holed fetch — kick a fresh one to supersede it and self-heal.
-      const since = loadingSince.current;
-      if (since !== null && Date.now() - since >= SUPERSEDE_MS) r.revalidate();
+      pollInFlight.current = false;
+      retrySlowly.current = failed;
+      scheduler.current?.onSettled();
     };
-    const id = window.setInterval(tick, ms);
-    const onWake = () => tick();
+
+    function invokeRevalidation(allowLoading = false): void {
+      if (disposed || blocked()) {
+        stopTimers();
+        return;
+      }
+      const r = ref.current;
+      if (!allowLoading && (pollInFlight.current || r.state !== "idle")) {
+        if (r.state === "loading") armWatchdog();
+        return;
+      }
+      if (allowLoading && r.state !== "loading") return;
+
+      pollInFlight.current = true;
+      // A watchdog supersede starts a new age window. For a normal call this is the
+      // idle→loading timestamp, and the render below will retain it.
+      loadingSince.current = Date.now();
+
+      let request: Promise<void>;
+      try {
+        request = r.revalidate();
+      } catch {
+        finish(null, true);
+        return;
+      }
+
+      if (pendingRequest.current !== request) {
+        pendingRequest.current = request;
+        request.then(
+          () => finish(request, false),
+          () => finish(request, true),
+        );
+      }
+
+      if (allowLoading || r.state === "loading") armWatchdog();
+    }
+
+    function armWatchdog(): void {
+      clearWatchdog();
+      if (disposed || blocked() || ref.current.state !== "loading") return;
+      const since = loadingSince.current ?? Date.now();
+      loadingSince.current = since;
+      const delay = Math.max(0, SUPERSEDE_MS - (Date.now() - since));
+      watchdog = window.setTimeout(() => {
+        watchdog = null;
+        if (disposed || blocked()) return;
+        if (ref.current.state !== "loading") {
+          onState();
+          return;
+        }
+        const age = Date.now() - (loadingSince.current ?? Date.now());
+        if (age >= SUPERSEDE_MS) invokeRevalidation(true);
+        else armWatchdog();
+      }, delay);
+    }
+
+    function tick(): void {
+      if (disposed) return;
+      if (blocked()) {
+        stopTimers();
+        return;
+      }
+      if (pollInFlight.current || ref.current.state !== "idle") {
+        if (ref.current.state === "loading") armWatchdog();
+        return;
+      }
+      consumeTopologyPoll();
+      invokeRevalidation();
+    }
+
+    function onState(): void {
+      if (disposed) return;
+      if (blocked()) {
+        stopTimers();
+        return;
+      }
+      clearTimer();
+      if (ref.current.state === "loading") {
+        armWatchdog();
+        return;
+      }
+      clearWatchdog();
+      if (pollInFlight.current) return;
+      schedule();
+    }
+
+    const currentScheduler = {
+      wake: () => {
+        clearTimer();
+        tick();
+      },
+      onState,
+      onSettled,
+    };
+    scheduler.current = currentScheduler;
+    if (wakeAfterRelease.current) {
+      wakeAfterRelease.current = false;
+      currentScheduler.wake();
+    } else {
+      onState();
+    }
+
+    const onWake = () => currentScheduler.wake();
     const onVisible = () => {
-      if (document.hidden) return;
+      if (document.hidden) {
+        stopTimers();
+        return;
+      }
       // Coming back to the foreground is the operator saying "show me now" — see lookNow. `focus`
       // and `online` are deliberately NOT given one: a focus fires on every tap into the window and
       // `online` fires on a flag that is known to lie (see the tick), so either would spend a
       // listing on something that is not somebody returning to the app.
       lookNow(scopeRef.current);
-      tick();
+      currentScheduler.wake();
     };
     window.addEventListener("focus", onWake);
     window.addEventListener("online", onWake);
     document.addEventListener("visibilitychange", onVisible);
+
     return () => {
-      clearInterval(id);
+      disposed = true;
+      stopTimers();
       window.removeEventListener("focus", onWake);
       window.removeEventListener("online", onWake);
       document.removeEventListener("visibilitychange", onVisible);
+      if (scheduler.current === currentScheduler) scheduler.current = null;
     };
-    // `sendKick` is the reschedule: a send must not wait out the remainder of a gap that was timed
-    // for an idle pane, so re-running this effect tears the old interval down and starts the next
-    // one BURST_MS from the tap. It goes through the same `tick` as every other beat, so it still
-    // cannot double-fire while a revalidation is in flight.
-  }, [ms, sendKick]);
+    // `sendKick`, the cadence, the lock, and the upload each rebuild this one scheduler. A send
+    // therefore restarts its gap from the tap, while blocked states retain no timer to spin.
+  }, [ms, sendKick, locked, longUpload]);
+
+  // External actions can start a revalidation without going through this hook. State transitions
+  // cancel any pending normal timer, arm the one-shot watchdog, and start the next gap only after
+  // the router reports idle again.
+  useEffect(() => {
+    scheduler.current?.onState();
+  }, [revalidator.state]);
 
   return ms;
 }

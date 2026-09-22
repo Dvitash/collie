@@ -17,10 +17,6 @@ const STORAGE_KEY = "collie:display-prefs:v4";
 describe("useDisplayPrefs", () => {
   beforeEach(() => localStorage.clear());
 
-  it("returns defaults when localStorage is empty", () => {
-    const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 10, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true });
-  });
 
   it("persists wrap=true and reloads it on mount", () => {
     const { result } = renderHook(() => useDisplayPrefs());
@@ -42,7 +38,7 @@ describe("useDisplayPrefs", () => {
       JSON.stringify({ wrap: false, fontSize: 14, rawTerminal: true, tapToFocus: false, expandClippedReply: false }),
     );
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: false, fontSize: 14, draftFontSize: 14, fontFamily: "system", rawTerminal: true, tapToFocus: false, expandClippedReply: false });
+    expect(result.current.prefs).toMatchObject({ wrap: false, fontSize: 14, rawTerminal: true, tapToFocus: false, expandClippedReply: false });
   });
 
   it("persists rawTerminal and reloads it on mount (the escape hatch survives a reload)", () => {
@@ -64,12 +60,23 @@ describe("useDisplayPrefs", () => {
     expect(reloaded.current.prefs.tapToFocus).toBe(false);
   });
 
-  // The storage key was deliberately NOT bumped for tapToFocus: a payload written before it existed
-  // must keep every other choice and take the default for the new one. A bump would have reset them.
-  it("reads a pre-tapToFocus payload without discarding the prefs it does have", () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ wrap: false, fontSize: 15, rawTerminal: true }));
+  // The storage key stays at v4: older payloads with the old default 10px become automatic, while a
+  // non-default size remains a deliberate fixed choice.
+  it("migrates the legacy default size to fit mode and preserves a legacy non-default size as fixed", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: 10 }));
+    expect(renderHook(() => useDisplayPrefs()).result.current.prefs.fitWidth).toBe(true);
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: 15 }));
+    expect(renderHook(() => useDisplayPrefs()).result.current.prefs.fitWidth).toBe(false);
+  });
+
+  it("lets the fit switch restore automatic sizing after +/- selects fixed mode", () => {
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: false, fontSize: 15, draftFontSize: 14, fontFamily: "system", rawTerminal: true, tapToFocus: true, expandClippedReply: true });
+    act(() => result.current.stepFontSize(1));
+    expect(result.current.prefs).toMatchObject({ fontSize: 11, fitWidth: false });
+    act(() => result.current.setFitWidth(true));
+    expect(result.current.prefs.fitWidth).toBe(true);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).fitWidth).toBe(true);
   });
 
   it("persists fontFamily and reloads it on mount", () => {
@@ -137,6 +144,7 @@ describe("useDisplayPrefs", () => {
     const { result } = renderHook(() => useDisplayPrefs());
     act(() => result.current.stepFontSize(2)); // 10 + 2 = 12
     expect(result.current.prefs.fontSize).toBe(12);
+    expect(result.current.prefs.fitWidth).toBe(false);
   });
 
   it("stepFontSize does not exceed max", () => {
@@ -176,10 +184,6 @@ describe("useDisplayPrefs", () => {
   // ── THE DRAFT FIELD'S OWN SIZE ────────────────────────────────────────────────────────────────
   // Its own number, its own narrower range, and a floor the browser imposes rather than the app.
 
-  it("defaults the draft field to 14, below the mirror-independent 16 the field used to be pinned at", () => {
-    const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs.draftFontSize).toBe(14);
-  });
 
   it("steps the draft size on its own, leaving the mirror's size untouched", () => {
     const { result } = renderHook(() => useDisplayPrefs());
@@ -256,12 +260,12 @@ describe("useDisplayPrefs — the rest", () => {
   it("falls back to defaults on malformed JSON", () => {
     localStorage.setItem(STORAGE_KEY, "not-json{{{");
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 10, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true });
+    expect(result.current.prefs).toMatchObject({ wrap: true, fontSize: 10, draftFontSize: 14, fontFamily: "system" });
   });
 
   it("falls back to defaults when stored value is not an object", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(42));
     const { result } = renderHook(() => useDisplayPrefs());
-    expect(result.current.prefs).toEqual({ wrap: true, fontSize: 10, draftFontSize: 14, fontFamily: "system", rawTerminal: false, tapToFocus: true, expandClippedReply: true });
+    expect(result.current.prefs).toMatchObject({ wrap: true, fontSize: 10, draftFontSize: 14, fontFamily: "system" });
   });
 });

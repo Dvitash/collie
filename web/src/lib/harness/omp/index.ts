@@ -1,7 +1,7 @@
 // The omp adapter (oh-my-pi's `omp` CLI, v17.2.12 through v18.1.10) — the second registered harness.
-// Its boxed-composer scanner (chrome.ts), rule-composer scanner (rule.ts) and shared lexing primitives
-// (markers.ts) live alongside this file; this module composes them into the HarnessAdapter block and
-// chrome re-surfacing surfaces.
+// Its boxed-composer scanner (chrome.ts), rule-composer scanner (rule.ts), extension top-dock scanner
+// (top-dock.ts) and shared lexing primitives (markers.ts) live alongside this file; this module
+// composes them into the HarnessAdapter block and chrome re-surfacing surfaces.
 //
 // This adapter is TIER 1 ONLY, BY CHOICE, and the choice is what makes it mergeable from fixtures
 // alone. It emits NO interactive block kind — not `prompt-select`, `wizard`, `preview-select`,
@@ -31,8 +31,8 @@
 // (reply-action.ts opens with `if (!adapter) return oneShot(args)`), so before this file omp panes took
 // the legacy one-shot send: type AND submit in a single call. A phone reply sent while any modal owned
 // the keyboard therefore fired the submit key at that modal, which confirms whatever row it had
-// highlighted. Registering ANY adapter swaps that for type-then-verify — the submit key waits until
-// `extractInputDraft` can see the text in the composer — boxed or rule-shaped — while
+// the highlighted. Registering ANY adapter swaps that for type-then-verify — the submit key waits until
+// `extractInputDraft` can see the text in the composer — boxed, rule-shaped, or top-dock-shaped — while
 // `composerReady` adds the pre-flight on top, reading the pane once BEFORE typing. It definitively
 // answers `false` on every capture in this corpus where a modal is up (harness/omp.test.ts), so
 // the message never reaches the modal either. Two honest edges: a failed pre-flight read falls through
@@ -63,15 +63,18 @@
 // `write` approval, the latter in both selection states. Two tools at one width is not every screen
 // omp can draw, so the STRUCTURAL guarantee above is still what covers the rest.
 //
-// Two fixture-derived scanners now carry that chrome claim. The boxed OMP 17/18.1.2 form remains
+// Three fixture-derived scanners now carry that chrome claim. The boxed OMP 17/18.1.2 form remains
 // anchored on `╰─ … ─╯` (closed or clipped) plus its adjacent top/status row. OMP 18.1.10's `rule`
 // form has no bottom border, so rule.ts instead requires its renderer's whole tail choreography:
 // a status-bearing top rule directly above `❯` plus bounded continuation rows, then exactly one blank
-// gap and one standalone status row at the buffer tail. Neither scanner searches past a completed
-// transcript row, and every captured picker and Ask dialog still makes both return null.
+// gap and one standalone status row at the buffer tail. The extension's `top-dock` form has no border
+// or footer, so top-dock.ts requires its two fully background-painted status rows immediately above
+// the prompt. None searches past a completed transcript row, and every captured picker and Ask dialog
+// still makes all three return null.
 
 import type { Block, StyledLine } from "../../blocks";
 import type { HarnessAdapter } from "../types";
+import { locateTopDockComposer, extractTopDockDraft, extractTopDockStatusLines, stripTopDockChrome, topDockComposerPrompt } from "./top-dock";
 import { locatePiComposer, piDraft } from "./pi-shape";
 import { ompOpaqueDraft, ompReplyChunks } from "./reply-chunks";
 import {
@@ -109,6 +112,8 @@ export function ompBuildBlocks(lines: StyledLine[]): Block[] {
 }
 
 export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return decorateOmpDisplay(extractTopDockStatusLines(lines, topDock));
   const pi = locatePiComposer(lines);
   if (pi) return decorateOmpDisplay(lines.slice(pi.bottom + 1, pi.suggestEnd));
   const rule = locateRuleComposer(lines);
@@ -117,6 +122,8 @@ export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
 }
 
 export function extractInputDraft(lines: StyledLine[]): string | null {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return extractTopDockDraft(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return piDraft(lines, pi);
   const rule = locateRuleComposer(lines);
@@ -124,6 +131,8 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
 }
 
 export function stripChrome(lines: StyledLine[]): StyledLine[] {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return stripTopDockChrome(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return lines.slice(0, pi.top);
   const rule = locateRuleComposer(lines);
@@ -131,11 +140,14 @@ export function stripChrome(lines: StyledLine[]): StyledLine[] {
 }
 
 export function hasComposer(lines: StyledLine[]): boolean {
+  if (locateTopDockComposer(lines)) return true;
   if (locatePiComposer(lines)) return true;
   return locateRuleComposer(lines) !== null || hasBoxComposer(lines);
 }
 
 export function composerPrompt(lines: StyledLine[]): string | null {
+  const topDock = locateTopDockComposer(lines);
+  if (topDock) return topDockComposerPrompt(lines, topDock);
   const pi = locatePiComposer(lines);
   if (pi) return lines.slice(pi.top, pi.bottom + 1).map((line) => line.segments.map((s) => s.text).join("").trimEnd()).join("\n");
   const rule = locateRuleComposer(lines);
@@ -153,8 +165,7 @@ export const ompAdapter: HarnessAdapter = {
   // is exactly the condition under which typing would land in a modal instead.
   composerReady: hasComposer,
   // …and the exact on-screen draft region the destructive pre-clear is bound to on the wire: the
-  // box's bottom prompt row or all of the rule composer's prompt rows. The box scanner declines when
-  // a long palette pushes that row out of range; the rule region ends one status row from the tail.
+  // box's bottom prompt row, all of the rule composer's prompt rows, or the top-dock prompt tail.
   composerPrompt,
   // Numbered paste chips contain no content evidence. Keep literal verification
   // by sending small, independently checked transport pastes instead.

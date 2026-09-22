@@ -200,6 +200,9 @@ export const de: Dictionary = {
   "settings.display.textSize.label": "Textgröße",
   "settings.display.textSize.decrease": "Schriftgröße verringern",
   "settings.display.textSize.increase": "Schriftgröße erhöhen",
+  "settings.display.fitWidth.label": "Text an Pane anpassen",
+  "settings.display.fitWidth.hint":
+    "Aktiv passt der Spiegel seine Schrift an die aufgezeichnete Terminalbreite an. Deaktiviert halten +/- eine feste Größe.",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "Neuer Build verfügbar, zum Aktualisieren antippen",

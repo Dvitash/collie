@@ -198,6 +198,9 @@ export const es: Dictionary = {
   "settings.display.textSize.label": "Tamano del texto",
   "settings.display.textSize.decrease": "Reducir fuente",
   "settings.display.textSize.increase": "Aumentar fuente",
+  "settings.display.fitWidth.label": "Ajustar texto al panel",
+  "settings.display.fitWidth.hint":
+    "Activado, el espejo ajusta el texto al ancho del terminal capturado. Desactivado, +/- mantiene un tamano fijo.",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "Nueva compilacion disponible. Pulsa para actualizar",

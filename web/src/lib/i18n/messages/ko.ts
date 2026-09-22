@@ -195,6 +195,9 @@ export const ko: Dictionary = {
   "settings.display.textSize.label": "글꼴 크기",
   "settings.display.textSize.decrease": "글꼴 축소",
   "settings.display.textSize.increase": "글꼴 확대",
+  "settings.display.fitWidth.label": "창 너비에 맞추기",
+  "settings.display.fitWidth.hint":
+    "켜면 미러 글꼴이 캡처된 터미널 너비에 맞춰집니다. 끄면 +/- 버튼으로 고정 크기를 사용합니다.",
 
   // --- settings.buildStamp ---
   "settings.buildStamp.tapToUpdate": "새 빌드 있음. 탭하여 업데이트",

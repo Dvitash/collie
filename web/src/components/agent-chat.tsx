@@ -17,10 +17,11 @@ import { useDashPrefs, openForCount } from "@/hooks/use-dash-prefs";
 import { useLaunchers } from "@/lib/launchers";
 import { buzz } from "@/lib/haptics";
 import { mirrorFont, useDisplayPrefs } from "@/hooks/use-display-prefs";
+import { useMirrorFontSize } from "@/hooks/use-mirror-font-size";
+import { useLocale } from "@/hooks/use-locale";
 import { useLatestReply } from "@/hooks/use-latest-reply";
 import { useMirrorImages } from "@/hooks/use-mirror-images";
 import { useStableTerminalDraft } from "@/hooks/use-terminal-draft";
-import { useLocale } from "@/hooks/use-locale";
 import { isConnecting } from "@/lib/connection";
 import { t, type MessageKey } from "@/lib/i18n";
 import { setStatus } from "@/lib/status";
@@ -231,9 +232,8 @@ export function AgentChat({
 
   const { launchers, home: launchersHome } = useLaunchers(scope);
   // Single display-prefs instance: the View controls (in <Composer>) write it, the mirror reads it.
-  const { prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus, setExpandClippedReply } =
+  const { prefs, setWrap, setFontSize, setFitWidth, setRawTerminal, setTapToFocus, setExpandClippedReply } =
     useDisplayPrefs();
-  // The chosen terminal font (Settings → Terminal font), applied by re-pointing `--font-mono` on
   // the two mirror surfaces below and NOWHERE else — see mirrorFont() for how, and why it is not a
   // custom property. Scoped to terminal CONTENT on purpose: app chrome that happens to be monospace
   // (the pane index badge, the cwd line) keeps the app's own face. Same boundary MIRROR_SPACE draws.
@@ -408,8 +408,11 @@ export function AgentChat({
     }
   }, [landscape, zen, autoZenActive]);
   const listRef = useRef<ChatMessageListHandle>(null);
+  const [mirrorScrollElement, setMirrorScrollElement] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    setMirrorScrollElement(listRef.current?.getScrollElement() ?? null);
+  }, []);
   const composerRef = useRef<ComposerHandle>(null);
-
   const gone = !agent;
 
   // Drag the ACTIONS BELT up to bring up the pane switcher, tracked finger-by-finger so the sheet
@@ -613,6 +616,13 @@ export function AgentChat({
     );
   }, [text, revision, logicalText, following]);
   const display = shown.text;
+  const mirrorFontSize = useMirrorFontSize({
+    display,
+    manualFontSize: prefs.fontSize,
+    fitWidth: prefs.fitWidth,
+    scrollElement: mirrorScrollElement,
+    fontFamilyKey: prefs.fontFamily,
+  });
   const hasNew = !following && display !== text;
 
   // The agent's own statusline (model · ctx% · cwd · branch · tokens · permission mode) is stripped
@@ -1875,7 +1885,7 @@ export function AgentChat({
                     text={display}
                     logicalText={shown.logicalText}
                     wrap={prefs.wrap}
-                    fontSize={prefs.fontSize}
+                    fontSize={mirrorFontSize}
                     query={findOpen ? findQuery : ""}
                     currentMatch={findOpen ? currentMatch : -1}
                     onMatchCount={findOpen ? handleMatchCount : undefined}
@@ -1991,7 +2001,7 @@ export function AgentChat({
                     rendersNativeMirror(agent?.agent) ? null : MIRROR_INVERT,
                     mirrorFace.className,
                   )}
-                  style={mirrorFace.style}
+                  style={{ ...mirrorFace.style, fontSize: `${mirrorFontSize}px` }}
                 >
                   {statusLines.map((row, i) => (
                     // Index key: these rows are a positional snapshot of the pane tail, re-derived on
@@ -2095,7 +2105,8 @@ export function AgentChat({
                   rawTerminalDraft={rawTerminalDraft}
                   prefs={prefs}
                   setWrap={setWrap}
-                  stepFontSize={stepFontSize}
+                  stepFontSize={(delta) => setFontSize(Math.round(mirrorFontSize) + delta)}
+                  setFitWidth={setFitWidth}
                   setRawTerminal={setRawTerminal}
                   setTapToFocus={setTapToFocus}
                   mirrorNative={mirrorNative}

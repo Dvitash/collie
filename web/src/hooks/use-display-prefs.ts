@@ -12,8 +12,14 @@ export interface DisplayPrefs {
    *  INSIDE the wrap (lib/table-run.ts), so no-wrap is now only for output whose columns matter
    *  everywhere, such as a full-screen TUI. */
   wrap: boolean;
-  /** Font size in px for the mirror pre (default: 10, range: 9–16). */
+  /** Manual font size in px for the mirror pre (default/fallback: 10, range: 9–16). */
   fontSize: number;
+  /**
+   * Fit the mirror to the captured terminal columns (default: true). When off, `fontSize` is the
+   * exact user-selected size. The effective fit may be fractional; the persisted manual choice is
+   * kept so turning fit back off restores it.
+   */
+  fitWidth: boolean;
   /**
    * Font size in px for the COMPOSER's draft field (default: 14, range: 13–16).
    *
@@ -172,9 +178,9 @@ export function mirrorFont(family: FontFamily): MirrorFont {
   return { className: MIRROR_FONT_CLASS, style: { fontFamily: stack } };
 }
 
-// NOT bumped for `tapToFocus`: loadPrefs defaults each field independently, so a v4 payload written
-// before it existed simply reads the default. Bumping would silently reset everyone's wrap, size and
-// raw-terminal choice to buy nothing.
+// NOT bumped for newly added fields: loadPrefs defaults each field independently. In particular,
+// fitWidth migrates an omitted/default 10px legacy size to automatic mode while preserving an
+// explicit non-default manual size.
 const STORAGE_KEY = "collie:display-prefs:v4";
 export const FONT_MIN = 9;
 export const FONT_MAX = 16;
@@ -185,6 +191,7 @@ export const DRAFT_FONT_MAX = 16;
 const DEFAULTS: DisplayPrefs = {
   wrap: true,
   fontSize: 10,
+  fitWidth: true,
   draftFontSize: 14,
   fontFamily: "system",
   rawTerminal: false,
@@ -266,14 +273,19 @@ function loadPrefs(): DisplayPrefs {
     if (!p) return DEFAULTS;
     const fontSize = asJsonNumber(p.fontSize);
     const draftFontSize = asJsonNumber(p.draftFontSize);
+    const storedFitWidth = asJsonBoolean(p.fitWidth);
+    // Before fitWidth existed, the old default 10px was not an intentional pin; only a stored
+    // non-default size carries a manual choice forward. An explicit fitWidth value always wins.
+    const fitWidth = storedFitWidth ?? (fontSize === undefined || clampFont(fontSize) === DEFAULTS.fontSize);
     return {
       wrap: asJsonBoolean(p.wrap) ?? DEFAULTS.wrap,
       fontSize: fontSize === undefined ? DEFAULTS.fontSize : clampFont(fontSize),
+      fitWidth,
       // Same independent-default rule as every field around it: a payload written before the draft
       // had its own size reads 14, which is the change this shipped. Nobody's mirror size moves.
       draftFontSize:
         draftFontSize === undefined ? DEFAULTS.draftFontSize : clampDraftFont(draftFontSize),
-      // Same independent-default rule as the fields above it, so a payload written before the
+      // Same independent-default rule as the fields above, so a payload written before the
       // family existed reads "system" — an existing install sees no change at all.
       fontFamily: readFontFamily(asJsonString(p.fontFamily)),
       rawTerminal: asJsonBoolean(p.rawTerminal) ?? DEFAULTS.rawTerminal,
@@ -299,11 +311,13 @@ export interface UseDisplayPrefsReturn {
   prefs: DisplayPrefs;
   /** Toggle or explicitly set line-wrap. */
   setWrap: (wrap: boolean) => void;
-  /** Set font size, clamped to 9–16. */
+  /** Set font size, clamped to 9–16, and switch to fixed mode. */
   setFontSize: (size: number) => void;
+  /** Set whether the mirror automatically fits its captured terminal width. */
+  setFitWidth: (fitWidth: boolean) => void;
   /** Set the mirror font family. */
   setFontFamily: (family: FontFamily) => void;
-  /** Step font size by delta (positive = larger), clamped to 9–16. */
+  /** Step font size by delta (positive = larger), clamped to 9–16, and switch to fixed mode. */
   stepFontSize: (delta: number) => void;
   /** Step the draft field's size by delta (positive = larger), clamped to 13–16. */
   stepDraftFontSize: (delta: number) => void;
@@ -328,7 +342,15 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
 
   const setFontSize = useCallback((size: number) => {
     setPrefs((p) => {
-      const next: DisplayPrefs = { ...p, fontSize: clampFont(size) };
+      const next: DisplayPrefs = { ...p, fontSize: clampFont(size), fitWidth: false };
+      savePrefs(next);
+      return next;
+    });
+  }, []);
+
+  const setFitWidth = useCallback((fitWidth: boolean) => {
+    setPrefs((p) => {
+      const next: DisplayPrefs = { ...p, fitWidth };
       savePrefs(next);
       return next;
     });
@@ -344,12 +366,11 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
 
   const stepFontSize = useCallback((delta: number) => {
     setPrefs((p) => {
-      const next: DisplayPrefs = { ...p, fontSize: clampFont(p.fontSize + delta) };
+      const next: DisplayPrefs = { ...p, fontSize: clampFont(p.fontSize + delta), fitWidth: false };
       savePrefs(next);
       return next;
     });
   }, []);
-
   const stepDraftFontSize = useCallback((delta: number) => {
     setPrefs((p) => {
       const next: DisplayPrefs = { ...p, draftFontSize: clampDraftFont(p.draftFontSize + delta) };
@@ -357,7 +378,6 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
       return next;
     });
   }, []);
-
   const setRawTerminal = useCallback((rawTerminal: boolean) => {
     setPrefs((p) => {
       const next: DisplayPrefs = { ...p, rawTerminal };
@@ -381,11 +401,11 @@ export function useDisplayPrefs(): UseDisplayPrefsReturn {
       return next;
     });
   }, []);
-
   return {
     prefs,
     setWrap,
     setFontSize,
+    setFitWidth,
     setFontFamily,
     stepFontSize,
     stepDraftFontSize,
