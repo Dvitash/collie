@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { parseBeacon } from "../bridge/beacon/parse.ts";
 import { beaconFileName, beaconKey } from "../bridge/beacon/paths.ts";
 import { BEACON_SCHEMA_VERSION } from "../bridge/beacon/types.ts";
-import { BEACON_HARNESS, BEACON_HOOKS, type BeaconEmitDeps, cmdBeaconEmit, readEnvMarkers, runBeaconEmit } from "./beacon.ts";
+import { BEACON_HOOKS, type BeaconEmitDeps, cmdBeaconEmit, readEnvMarkers, runBeaconEmit } from "./beacon.ts";
 import { context, fakeFiles, STATE } from "./fakes.ts";
 import { EXIT } from "./io.ts";
 import type { Environment } from "./context.ts";
@@ -37,12 +37,13 @@ function payload(over: JsonObject = {}): string {
 }
 
 function deps(
-  over: { env?: Environment; stdin?: string; proc?: string | null; pid?: number } = {},
+  over: { env?: Environment; stdin?: string; proc?: string | null; pid?: number; harness?: string } = {},
 ): BeaconEmitDeps & { files: ReturnType<typeof fakeFiles> } {
   const files = fakeFiles(over.proc === null ? {} : { [PROC]: over.proc ?? STAT });
   return {
     ctx: context(over.env ?? TMUX),
     files,
+    harness: over.harness,
     readStdin: () => Promise.resolve(over.stdin ?? payload()),
     agentPid: over.pid ?? AGENT_PID,
     now: () => 1_700_000_000_000,
@@ -142,7 +143,8 @@ describe("the beacon it writes", () => {
     const record = parseBeacon(text)!;
     expect(record).toEqual({
       schemaVersion: BEACON_SCHEMA_VERSION,
-      harness: BEACON_HARNESS,
+      // No harness argument is the installed Claude hook command, byte for byte.
+      harness: "claude",
       session: { kind: "id", value: SESSION },
       status: "working",
       pid: AGENT_PID,
@@ -253,5 +255,54 @@ describe("it never fails, and it never speaks", () => {
   test("stdin that never resolves as text is exit 0", async () => {
     const d = { ...deps(), readStdin: () => Promise.reject(new Error("EIO")) };
     expect(await cmdBeaconEmit(d)).toBe(EXIT.OK);
+  });
+});
+
+describe("`beacon emit omp` — the extension's states, keyed by name", () => {
+  const OMP_SESSION = "01970a3b-7c2d-7e4f-9a1b-2c3d4e5f6a7b";
+  const omp = (state: string): string => JSON.stringify({ hook_event_name: state, session_id: OMP_SESSION });
+
+  test("working, waiting and idle each write their own status, under the omp harness", async () => {
+    for (const state of ["working", "waiting", "idle"] as const) {
+      const d = deps({ harness: "omp", stdin: omp(state) });
+      expect(await cmdBeaconEmit(d)).toBe(EXIT.OK);
+      const [text] = [...beacons(d.files).values()];
+      const record = parseBeacon(text ?? "");
+      expect(record?.harness).toBe("omp");
+      expect(record?.status).toBe(state);
+      expect(record?.session).toEqual({ kind: "id", value: OMP_SESSION });
+    }
+  });
+
+  test("a Claude event name is not an omp state, and an omp state is not a Claude event", async () => {
+    const claudeEventUnderOmp = deps({ harness: "omp", stdin: omp("UserPromptSubmit") });
+    expect(await cmdBeaconEmit(claudeEventUnderOmp)).toBe(EXIT.OK);
+    expect(beacons(claudeEventUnderOmp.files).size).toBe(0);
+    const ompStateUnderClaude = deps({ stdin: omp("working") });
+    expect(await cmdBeaconEmit(ompStateUnderClaude)).toBe(EXIT.OK);
+    expect(beacons(ompStateUnderClaude.files).size).toBe(0);
+  });
+
+  test("an unknown harness writes nothing and still exits 0", async () => {
+    const d = deps({ harness: "codex", stdin: omp("working") });
+    expect(await cmdBeaconEmit(d)).toBe(EXIT.OK);
+    expect(beacons(d.files).size).toBe(0);
+  });
+
+  test("inside tern the marker is the pane and its socket", async () => {
+    const env: Environment = { TERN_PANE: "p-3", TERN_PANE_SOCKET: "/run/user/1000/tern.sock" };
+    expect(readEnvMarkers(env)).toEqual([{ namespace: "tern", scope: "/run/user/1000/tern.sock", pane: "p-3" }]);
+    const d = deps({ harness: "omp", env, stdin: omp("waiting") });
+    expect(await cmdBeaconEmit(d)).toBe(EXIT.OK);
+    const [text] = [...beacons(d.files).values()];
+    expect(parseBeacon(text ?? "")?.markers).toEqual([
+      { namespace: "tern", scope: "/run/user/1000/tern.sock", pane: "p-3" },
+    ]);
+  });
+
+  test("an emitter re-parented to init writes nothing — pid 1 is never the agent", async () => {
+    const d = deps({ harness: "omp", stdin: omp("idle"), pid: 1, proc: STAT });
+    expect(await cmdBeaconEmit(d)).toBe(EXIT.OK);
+    expect(beacons(d.files).size).toBe(0);
   });
 });

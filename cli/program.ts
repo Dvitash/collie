@@ -256,10 +256,11 @@ function configVerbDeps(io: Io): ConfigDeps {
   return configDeps(loadContext(io.err), io, realFiles);
 }
 
-function beaconDeps(): BeaconEmitDeps {
+function beaconDeps(harness: string | undefined): BeaconEmitDeps {
   return {
     ctx: loadContext(() => {}),
     files: realFiles,
+    harness,
     readStdin: () => Bun.stdin.text(),
     agentPid: process.ppid,
   };
@@ -529,12 +530,12 @@ export const COMMANDS: readonly Command[] = [
     subcommands: [
       {
         name: "install",
-        summary: "register the beacon hooks: `hooks install claude`",
+        summary: "register the beacon emitter: `hooks install claude` or `hooks install omp`",
         run: (args, s) => cmdHooksInstall(hooksDeps(s.io), args),
       },
       {
         name: "uninstall",
-        summary: "remove only the entries collie owns: `hooks uninstall claude`",
+        summary: "remove only what collie owns: `hooks uninstall claude` or `hooks uninstall omp`",
         run: (args, s) => cmdHooksUninstall(hooksDeps(s.io), args),
       },
       {
@@ -552,8 +553,8 @@ export const COMMANDS: readonly Command[] = [
     subcommands: [
       {
         name: "emit",
-        summary: "internal: write this pane's beacon from the hook payload on stdin",
-        run: () => runBeaconEmit(beaconDeps),
+        summary: "internal: write this pane's beacon from the hook payload on stdin (`emit [claude|omp]`)",
+        run: (args) => runBeaconEmit(() => beaconDeps(args[0])),
       },
     ],
     // A bare `collie beacon`, or a misspelt sub-verb, is still an invocation from a hook — so it gets

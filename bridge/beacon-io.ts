@@ -19,7 +19,7 @@ import { beaconsDir, BEACON_FILE_SUFFIX } from "./beacon/paths.ts";
 import type { BeaconDirectory, BeaconLiveness, BeaconSweepDeps } from "./beacon/reader.ts";
 import type { JsonValue } from "./json.ts";
 import type { Environment } from "../cli/context.ts";
-import { claudeSettingsTargets, markedCommandIn } from "../cli/hooks.ts";
+import { claudeSettingsTargets, markedCommandIn, ompExtensionPath, ompExtensionState } from "../cli/hooks.ts";
 
 /**
  * The beacon directory on disk.
@@ -152,10 +152,12 @@ export function hooksInstalledProbe(deps: HooksProbeDeps): () => boolean {
     const now = clock();
     if (now - checkedAt < HOOKS_PROBE_TTL_MS) return answer;
     checkedAt = now;
-    answer = claudeSettingsTargets({ home: deps.home, env: deps.env }).some((target) => {
+    const claude = claudeSettingsTargets({ home: deps.home, env: deps.env }).some((target) => {
       const text = read(target.path);
       return text !== null && documentCarriesOurHooks(text);
     });
+    // omp's emitter is an extension file, not a settings entry — ours when its first line says so.
+    answer = claude || ompExtensionState(read(ompExtensionPath({ home: deps.home, env: deps.env }))).kind === "installed";
     return answer;
   };
 }

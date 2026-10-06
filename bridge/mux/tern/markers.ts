@@ -20,9 +20,9 @@ export function ternBeaconMatcher(
     },
     notesWithoutHooks: {
       agentDetection:
-        "Tern does not track agent state directly. Install beacon hooks with `collie hooks install claude` so an agent names itself and its status.",
+        "Tern does not track agent state directly. Install beacon hooks with `collie hooks install claude` (or `collie hooks install omp`) so an agent names itself and its status.",
       agentSessionRef:
-        "Pane history reads the agent's own session log. `collie hooks install claude` supplies the session reference; until then history is absent.",
+        "Pane history reads the agent's own session log. `collie hooks install claude` (or `collie hooks install omp`) supplies the session reference; until then history is absent.",
     },
   };
 }

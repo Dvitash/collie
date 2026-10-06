@@ -7,6 +7,7 @@ import { publishedBinary } from "./install-kind.ts";
 import { EXIT, type Io } from "./io.ts";
 import { type LinkReader, linkPath, resolveLinkTarget } from "./link.ts";
 import type { Files } from "./sys.ts";
+import { ompExtensionSource } from "./omp-extension.ts";
 import { collieBinary } from "./unit.ts";
 
 // `collie hooks install claude` / `uninstall claude` / `status` — putting the beacon emitter into the
@@ -51,8 +52,11 @@ import { collieBinary } from "./unit.ts";
 // an old one missing the field gets it back the next time bytes are compared — no marker bump, because
 // the command string is still exactly what it was.
 
-/** The harnesses that have an emitter. One today; the arg is required so the second needs no new verb. */
-export const HOOK_HARNESSES = ["claude"] as const;
+/**
+ * The harnesses that have an emitter. Claude Code takes marked entries merged into its settings; omp
+ * has no shell hooks, so it takes one extension file Collie owns outright (.adr/0086).
+ */
+export const HOOK_HARNESSES = ["claude", "omp"] as const;
 
 /** The `hooks` sub-verbs, in the order the usage block prints them. */
 export const HOOKS_SUBCOMMANDS = ["install", "uninstall", "status"] as const;
@@ -227,6 +231,63 @@ export function claudeSettingsTargets(ctx: Pick<CliContext, "home" | "env">): Ho
     if (trimmed !== "") dirs.push(dirname(trimmed));
   }
   return [...new Set(dirs)].map((dir) => ({ dir, path: join(dir, "settings.json") }));
+}
+
+// ── omp: one extension file, not a settings merge ────────────────────────────
+
+/**
+ * Where `hooks install omp` writes the extension: `<agent dir>/extensions/collie-beacon.ts`, the
+ * agent dir being `PI_CODING_AGENT_DIR` when set (omp's own override) and `~/.omp/agent` otherwise.
+ * omp auto-discovers every module in that directory at startup.
+ *
+ * Asks for two fields, not the whole context, for the reason {@link claudeSettingsTargets} does: the
+ * bridge's "is anything installed" probe asks the same question and must get the same answer.
+ */
+export function ompExtensionPath(ctx: Pick<CliContext, "home" | "env">): string {
+  const override = ctx.env.PI_CODING_AGENT_DIR?.trim();
+  const agentDir = override === undefined || override === "" ? join(ctx.home, ".omp", "agent") : override;
+  return join(agentDir, "extensions", "collie-beacon.ts");
+}
+
+/** The line {@link ompExtensionSource} pins the binary on, read back by {@link ompBinaryOf}. */
+const OMP_BINARY_LINE = /^const COLLIE_BIN = (".*");$/mu;
+
+/** The absolute name an installed extension spawns, or null when the file is not shaped like ours. */
+export function ompBinaryOf(text: string): string | null {
+  const literal = OMP_BINARY_LINE.exec(text)?.[1];
+  if (literal === undefined) return null;
+  try {
+    // The capture opens and closes with a quote, so a literal JSON accepts is one string value.
+    return String(JSON.parse(literal));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the extension file is, as a verdict. OWNERSHIP IS THE FIRST LINE: a file whose first line
+ * does not open with the marker is somebody else's, and nothing here writes or removes it.
+ *
+ * `current` is a BYTE comparison against what this build writes for the binary the file already
+ * pins — so a changed template, or a different marker version, reads as behind, and a re-pin to a
+ * new binary (which `doctor` reports on its own) does not.
+ */
+export type OmpExtensionState =
+  | { readonly kind: "absent" }
+  | { readonly kind: "foreign" }
+  | { readonly kind: "installed"; readonly version: number; readonly binary: string | null; readonly current: boolean };
+
+export function ompExtensionState(text: string | null): OmpExtensionState {
+  if (text === null) return { kind: "absent" };
+  const firstLine = text.split("\n", 1)[0] ?? "";
+  if (!firstLine.startsWith(`// ${HOOK_MARKER_PREFIX}`)) return { kind: "foreign" };
+  const binary = ompBinaryOf(text);
+  return {
+    kind: "installed",
+    version: markerVersionOf(firstLine) ?? 0,
+    binary,
+    current: binary !== null && text === ompExtensionSource(binary, HOOK_MARKER),
+  };
 }
 
 // ── The merge ────────────────────────────────────────────────────────────────
@@ -446,11 +507,11 @@ function refusalFact(refusal: TargetRefusal): string {
 function refusalRemedy(refusal: TargetRefusal): string {
   switch (refusal.kind) {
     case "file-symlink":
-      return "Replace it with the real file (or point the profile at the real one), then re-run `collie hooks install claude`.";
+      return "Replace it with the real file (or point the profile at the real one), then re-run `collie hooks install`.";
     case "dangling-dir":
-      return `Create ${refusal.points}, or point ${refusal.link} at a directory that exists, then re-run \`collie hooks install claude\`.`;
+      return `Create ${refusal.points}, or point ${refusal.link} at a directory that exists, then re-run \`collie hooks install\`.`;
     case "unwritable-dir":
-      return `Point ${refusal.link} at a directory this process can write to, then re-run \`collie hooks install claude\`.`;
+      return `Point ${refusal.link} at a directory this process can write to, then re-run \`collie hooks install\`.`;
   }
 }
 
@@ -477,30 +538,94 @@ function writeSettings(deps: HooksDeps, target: HookTarget, previous: string | n
   if (previous !== null && !deps.files.exists(backupPath(target))) {
     deps.files.write(backupPath(target), previous, 0o600);
   }
-  const temp = `${target.path}.collie-tmp`;
+  writeAtomically(deps, target.path, text);
+}
+
+/** Temp file beside `path`, then rename — a reader sees the old bytes or the new ones, never half. */
+function writeAtomically(deps: HooksDeps, path: string, text: string): void {
+  const temp = `${path}.collie-tmp`;
   try {
     deps.files.write(temp, text, 0o600);
-    deps.files.rename(temp, target.path);
+    deps.files.rename(temp, path);
   } catch (err) {
     deps.files.remove(temp);
     throw err;
   }
 }
 
+type HookHarness = (typeof HOOK_HARNESSES)[number];
+
 /** The harness argument, or null when it was missing or unknown. */
-function readHarness(deps: HooksDeps, args: readonly string[], verb: string): string | null {
+function readHarness(deps: HooksDeps, args: readonly string[], verb: string): HookHarness | null {
   const name = args[0];
-  if (name !== undefined && HOOK_HARNESSES.some((h) => h === name)) return name;
+  const known = HOOK_HARNESSES.find((h) => h === name);
+  if (known !== undefined) return known;
   deps.io.err(`usage: collie hooks ${verb} {${HOOK_HARNESSES.join("|")}}`);
   if (name !== undefined && name !== "") {
-    deps.io.err(`  \`${name}\` has no beacon emitter — only ${HOOK_HARNESSES.join(", ")} does.`);
+    deps.io.err(`  \`${name}\` has no beacon emitter — only ${HOOK_HARNESSES.join(", ")} do.`);
   }
   return null;
 }
 
-/** `collie hooks install claude` — merge every registration into every target, adding what is missing. */
+/** `collie hooks install omp` — write the extension, pinned, unless a file that is not ours is there. */
+function installOmp(deps: HooksDeps): number {
+  const { binary, source } = resolveHookCommand(deps.ctx, deps.fs);
+  const path = ompExtensionPath(deps.ctx);
+  if (deps.fs.probe(path).kind === "symlink") {
+    printRefusal(deps, { kind: "file-symlink", path });
+    return EXIT.FAIL;
+  }
+  const current = deps.files.read(path);
+  if (ompExtensionState(current).kind === "foreign") {
+    deps.io.err(`error: ${path} exists and does not carry the ${HOOK_MARKER_PREFIX}N marker — leaving it alone.`);
+    deps.io.err("  Move it aside (it is not collie's), then re-run `collie hooks install omp`.");
+    return EXIT.FAIL;
+  }
+  const text = ompExtensionSource(binary, HOOK_MARKER);
+  if (text === current) {
+    deps.io.out(`${path} already has it — no bytes changed.`);
+  } else {
+    try {
+      writeAtomically(deps, path, text);
+    } catch (err) {
+      deps.io.err(`error: could not write ${path} — ${err instanceof Error ? err.message : String(err)}`);
+      return EXIT.FAIL;
+    }
+    deps.io.out(`✓ ${path}`);
+  }
+  deps.io.out(`  working, waiting, idle → \`${binary} beacon emit omp\``);
+  deps.io.out(`  ${PINNED_NOTE[source]}`);
+  deps.io.out("  Restart running omp sessions to load it. Outside tern/tmux/zellij it does nothing.");
+  return EXIT.OK;
+}
+
+/** `collie hooks uninstall omp` — remove the extension only when its first line says it is ours. */
+function uninstallOmp(deps: HooksDeps): number {
+  const path = ompExtensionPath(deps.ctx);
+  const state = ompExtensionState(deps.files.read(path));
+  if (state.kind === "absent") {
+    deps.io.out(`nothing to remove — ${path} is not there.`);
+    return EXIT.OK;
+  }
+  if (state.kind === "foreign") {
+    deps.io.out(`nothing to remove — ${path} does not carry the collie-beacon marker, so it is left alone.`);
+    return EXIT.OK;
+  }
+  try {
+    deps.files.remove(path);
+  } catch (err) {
+    deps.io.err(`error: could not remove ${path} — ${err instanceof Error ? err.message : String(err)}`);
+    return EXIT.FAIL;
+  }
+  deps.io.out(`✓ ${path} — removed. Running omp sessions keep it loaded until they restart.`);
+  return EXIT.OK;
+}
+
+/** `collie hooks install claude|omp` — for claude, merge every registration into every target. */
 export function cmdHooksInstall(deps: HooksDeps, args: readonly string[]): number {
-  if (readHarness(deps, args, "install") === null) return EXIT.USAGE;
+  const harness = readHarness(deps, args, "install");
+  if (harness === null) return EXIT.USAGE;
+  if (harness === "omp") return installOmp(deps);
   const { command, binary, source } = resolveHookCommand(deps.ctx, deps.fs);
   let failed = false;
 
@@ -547,9 +672,11 @@ export function cmdHooksInstall(deps: HooksDeps, args: readonly string[]): numbe
   return EXIT.OK;
 }
 
-/** `collie hooks uninstall claude` — remove only what carries the marker. */
+/** `collie hooks uninstall claude|omp` — remove only what carries the marker. */
 export function cmdHooksUninstall(deps: HooksDeps, args: readonly string[]): number {
-  if (readHarness(deps, args, "uninstall") === null) return EXIT.USAGE;
+  const harness = readHarness(deps, args, "uninstall");
+  if (harness === null) return EXIT.USAGE;
+  if (harness === "omp") return uninstallOmp(deps);
   let failed = false;
   let removed = 0;
 
@@ -633,6 +760,8 @@ function targetState(deps: HooksDeps, target: HookTarget): HookTargetState {
  * {@link BEACON_HOOKS} is compiled in and the old build's copy is exactly the stale thing.
  */
 export function hooksAreBehind(deps: HooksDeps): boolean {
+  const omp = ompExtensionState(deps.files.read(ompExtensionPath(deps.ctx)));
+  if (omp.kind === "installed" && !omp.current) return true;
   return claudeSettingsTargets(deps.ctx)
     .map((target) => targetState(deps, target))
     .some((state) => state.kind === "partial" || state.kind === "stale");
@@ -653,7 +782,22 @@ export function cmdHooksStatus(deps: HooksDeps, args: readonly string[] = []): n
   for (const target of claudeSettingsTargets(deps.ctx)) {
     deps.io.out(`${target.path}: ${describeTarget(deps, target)}`);
   }
+  const ompPath = ompExtensionPath(deps.ctx);
+  deps.io.out(`${ompPath}: ${describeOmp(ompExtensionState(deps.files.read(ompPath)))}`);
   return EXIT.OK;
+}
+
+function describeOmp(state: OmpExtensionState): string {
+  switch (state.kind) {
+    case "absent":
+      return "omp extension not installed — `collie hooks install omp` writes it";
+    case "foreign":
+      return "not collie's — no collie-beacon marker on its first line, so it is left alone";
+    case "installed":
+      return state.current
+        ? `omp extension installed (v${String(state.version)})`
+        : `omp extension installed at v${String(state.version)}, behind this build — re-run \`collie hooks install omp\``;
+  }
 }
 
 function describeTarget(deps: HooksDeps, target: HookTarget): string {
@@ -697,9 +841,9 @@ export function cmdHooks(deps: HooksDeps, args: readonly string[]): number {
         deps.io.err(`error: unknown hooks subcommand \`${sub}\``);
       }
       deps.io.err(hooksUsage());
-      deps.io.err("  install     register the beacon hooks: `hooks install claude`");
-      deps.io.err("  uninstall   remove only the entries collie owns: `hooks uninstall claude`");
-      deps.io.err("  status      what each settings file carries right now (reads only)");
+      deps.io.err("  install     register the beacon emitter: `hooks install claude` or `hooks install omp`");
+      deps.io.err("  uninstall   remove only what collie owns: `hooks uninstall claude` or `hooks uninstall omp`");
+      deps.io.err("  status      what each settings file and the omp extension carry right now (reads only)");
       return EXIT.USAGE;
   }
 }

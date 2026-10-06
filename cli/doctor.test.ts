@@ -24,6 +24,7 @@ import {
 import type { AclTool, SaveResult } from "../bridge/icacls.ts";
 import type { OwnerOnlyDeps } from "../bridge/owner-only.ts";
 import { HOOK_MARKER, HOOK_MARKER_PREFIX } from "./hooks.ts";
+import { ompExtensionSource } from "./omp-extension.ts";
 import type { LinkProbe } from "./link.ts";
 import type { DoctorView, Ui } from "./render.ts";
 import {
@@ -379,6 +380,7 @@ describe("collie doctor — the contract", () => {
       // Windows only, and this suite runs on the real host.
       ...(HOST.platform === "win32" ? ["windows-task", "windows-long-paths", "secrets-private"] : []),
       "beacon-hooks-claude",
+      "beacon-hooks-omp",
       "beacons",
       "herdr-version",
       "integration-claude",
@@ -1563,6 +1565,7 @@ describe("the finding set is scoped by the chosen multiplexer", () => {
       "mux",
       ...(HOST.platform === "win32" ? ["windows-task", "windows-long-paths", "secrets-private"] : []),
       "beacon-hooks-claude",
+      "beacon-hooks-omp",
       "beacons",
       "agent-sessions",
       "journal-roots",
@@ -1659,6 +1662,32 @@ describe("beacon-hooks-claude", () => {
     expect(finding.detail).toContain("notification");
     expect(finding.detail).toContain(OWN_BINARY);
     expect(code).toBe(EXIT.FAIL);
+  });
+
+  test("only the omp extension installed is enough — neither check is red", async () => {
+    const extension = join(HOME, ".omp", "agent", "extensions", "collie-beacon.ts");
+    const h = harness(null, [], {
+      env: ON_TMUX,
+      files: {
+        ...without(healthyFiles(), SETTINGS),
+        [TMUX_BIN]: "",
+        [extension]: ompExtensionSource(OWN_BINARY, HOOK_MARKER),
+      },
+      answers: tmuxAnswers("3.4\nwork\n"),
+    });
+    const { byCheck } = await findings(h);
+    expect(byCheck.get("beacon-hooks-claude")?.status).toBe("ok");
+    expect(byCheck.get("beacon-hooks-claude")?.detail).toContain("omp extension");
+    expect(byCheck.get("beacon-hooks-omp")?.status).toBe("ok");
+    expect(byCheck.get("beacon-hooks-omp")?.detail).toContain(OWN_BINARY);
+  });
+
+  test("an omp extension out of date is a warning naming the omp install", async () => {
+    const extension = join(HOME, ".omp", "agent", "extensions", "collie-beacon.ts");
+    const older = ompExtensionSource(OWN_BINARY, HOOK_MARKER).replace("RETRY_GRACE_MS = 2500", "RETRY_GRACE_MS = 1000");
+    const { byCheck } = await findings(harness(null, [], { files: { ...healthyFiles(), [extension]: older } }));
+    expect(byCheck.get("beacon-hooks-omp")?.status).toBe("warn");
+    expect(byCheck.get("beacon-hooks-omp")?.remedy).toContain("collie hooks install omp");
   });
 
   test("an install under a blind mux is the ordinary ✓", async () => {

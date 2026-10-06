@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { documentCarriesOurHooks, hooksInstalledProbe, HOOKS_PROBE_TTL_MS } from "./beacon-io.ts";
-import { HOOK_MARKER } from "../cli/hooks.ts";
+import { HOOK_MARKER, ompExtensionPath } from "../cli/hooks.ts";
+import { ompExtensionSource } from "../cli/omp-extension.ts";
 
 // The one question the bridge asks about the agent's settings: are OUR hooks in it? The filesystem
 // half of this module needs a real disk and is exercised by the CLI's own suite; what is pinned here
@@ -54,6 +55,26 @@ describe("hooksInstalledProbe", () => {
 
   test("no settings file anywhere is a no, not a throw", () => {
     expect(hooksInstalledProbe({ home: HOME, env: {}, readFile: () => null })()).toBe(false);
+  });
+
+  test("the omp extension alone is enough — a host that runs only omp still gets sight", () => {
+    const extension = ompExtensionPath({ home: HOME, env: {} });
+    const probe = hooksInstalledProbe({
+      home: HOME,
+      env: {},
+      readFile: (path) => (path === extension ? ompExtensionSource("/usr/local/bin/collie", HOOK_MARKER) : null),
+    });
+    expect(probe()).toBe(true);
+  });
+
+  test("an extension file without our marker is not ours", () => {
+    const extension = ompExtensionPath({ home: HOME, env: {} });
+    const probe = hooksInstalledProbe({
+      home: HOME,
+      env: {},
+      readFile: (path) => (path === extension ? "export default function () {}\n" : null),
+    });
+    expect(probe()).toBe(false);
   });
 
   test("the answer is cached, then re-read — installing the hooks needs no restart", () => {

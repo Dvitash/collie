@@ -55,9 +55,9 @@ export function zellijBeaconMatcher(namespace: string, session: ZellijSessionBin
     },
     notesWithoutHooks: {
       agentDetection:
-        "zellij does not know what an agent is, so Collie asks the agent instead: install the beacon hooks with `collie hooks install claude` and a pane running Claude names itself and its status. Until then every pane reads as a shell rather than as a guess that would pick the wrong grammar.",
+        "zellij does not know what an agent is, so Collie asks the agent instead: install the beacon hooks with `collie hooks install claude` (or `collie hooks install omp`) and a pane running that agent names itself and its status. Until then every pane reads as a shell rather than as a guess that would pick the wrong grammar.",
       agentSessionRef:
-        "Reading an agent's own session log needs a reference to one, and zellij supplies none. `collie hooks install claude` lets the agent supply it; until then history is absent here, not empty.",
+        "Reading an agent's own session log needs a reference to one, and zellij supplies none. `collie hooks install claude` (or `collie hooks install omp`) lets the agent supply it; until then history is absent here, not empty.",
     },
   };
 }

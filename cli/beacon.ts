@@ -78,7 +78,7 @@ interface MuxEnvMarker {
   scopeOf(raw: string): string;
 }
 
-const MUX_ENV_MARKERS: readonly MuxEnvMarker[] = [
+export const MUX_ENV_MARKERS: readonly MuxEnvMarker[] = [
   {
     namespace: "tmux",
     paneVar: "TMUX_PANE",
@@ -175,8 +175,26 @@ export const BEACON_HOOKS: readonly HookRegistration[] = [
   { event: "Notification", matcher: "idle_prompt", status: "waiting" },
 ];
 
-/** The harness this emitter speaks for, in the journal registry's vocabulary. */
-export const BEACON_HARNESS = "claude";
+/**
+ * omp's states, which are also the `hook_event_name`s its extension writes (`cli/omp-extension.ts`).
+ *
+ * omp has no shell hooks, so the "event" is already the state its in-process extension derived — the
+ * list is the whitelist, so a value the extension never sends is not a status.
+ */
+export const OMP_BEACON_STATES = ["working", "waiting", "idle"] as const satisfies readonly BeaconStatus[];
+
+/** The harness `beacon emit` speaks for when none is named — every installed Claude hook command. */
+export const DEFAULT_BEACON_HARNESS = "claude";
+
+/**
+ * What `event` says `harness` is doing, or null when the harness has no emitter or the event no row.
+ * The harness is the journal registry's vocabulary (`claude`, `omp`), and the record carries it as is.
+ */
+export function beaconStatusOf(harness: string, event: JsonValue | undefined): BeaconStatus | null {
+  if (harness === "claude") return BEACON_HOOKS.find((row) => row.event === event)?.status ?? null;
+  if (harness === "omp") return OMP_BEACON_STATES.find((state) => state === event) ?? null;
+  return null;
+}
 
 /**
  * A session id, as the journal will use it.
@@ -212,6 +230,8 @@ function readField(row: JsonObject, key: string, accepted: RegExp): string | nul
 export interface BeaconEmitDeps {
   readonly ctx: CliContext;
   readonly files: Files;
+  /** `beacon emit [harness]`'s argument — absent means {@link DEFAULT_BEACON_HARNESS}. */
+  readonly harness?: string | undefined;
   /** The hook payload. A seam so the tests need no real stdin. */
   readStdin(): Promise<string>;
   /** The agent's pid — `process.ppid` in production (see the header's probe note). */
@@ -264,9 +284,12 @@ function writeBeacon(deps: BeaconEmitDeps, record: BeaconRecord): void {
  */
 export async function cmdBeaconEmit(deps: BeaconEmitDeps): Promise<number> {
   try {
+    const harness = deps.harness ?? DEFAULT_BEACON_HARNESS;
     const markers = readEnvMarkers(deps.ctx.env);
     // Not in a multiplexer Collie can join a beacon to: nothing to say, and nothing read.
     if (markers.length === 0) return EXIT.OK;
+    // A harness with no event table has nothing it can say either — same silence, same exit.
+    if (harness !== "claude" && harness !== "omp") return EXIT.OK;
 
     const payload = asObject(JSON.parse(await deps.readStdin()));
     if (payload === null) return EXIT.OK;
@@ -276,21 +299,22 @@ export async function cmdBeaconEmit(deps: BeaconEmitDeps): Promise<number> {
     // conversation the operator cannot see in it.
     if (payload.agent_id !== undefined && payload.agent_id !== null) return EXIT.OK;
 
-    const event = payload.hook_event_name;
-    const registration = BEACON_HOOKS.find((row) => row.event === event);
-    if (registration === undefined) return EXIT.OK;
+    const status = beaconStatusOf(harness, payload.hook_event_name);
+    if (status === null) return EXIT.OK;
 
     const session = readField(payload, "session_id", SESSION_ID);
     if (session === null) return EXIT.OK;
 
+    // An orphaned emitter (the agent already gone) is re-parented to init — pid 1 is never the agent.
+    if (deps.agentPid <= 1) return EXIT.OK;
     const pidStartTime = readPidStartTime(deps.files, deps.agentPid);
     if (pidStartTime === null) return EXIT.OK;
 
     writeBeacon(deps, {
       schemaVersion: BEACON_SCHEMA_VERSION,
-      harness: BEACON_HARNESS,
+      harness,
       session: { kind: "id", value: session },
-      status: registration.status,
+      status,
       pid: deps.agentPid,
       pidStartTime,
       markers,

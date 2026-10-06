@@ -8,6 +8,9 @@ import {
   markedCommandsByEvent,
   markerVersionOf,
   resolveHookCommand,
+  ompExtensionPath,
+  ompExtensionState,
+  type OmpExtensionState,
   type HookTarget,
 } from "./hooks.ts";
 import { HOST, type Host } from "../bridge/host.ts";
@@ -197,6 +200,8 @@ export async function cmdDoctor(deps: DoctorDeps, args: readonly string[]): Prom
   // The emitter's two findings ride together: the second one's wording depends on whether an install
   // was found, and reading the settings files twice would be two answers to one question.
   const hookEntries = installedEntries(deps);
+  const ompPath = ompExtensionPath(deps.ctx);
+  const omp = ompExtensionState(deps.files.read(ompPath));
   // The third thing that rides with them: whether the configured multiplexer names its own agents.
   // An unknown mux name reads as `true` here — `mux` is already an error about exactly that, and a
   // second red line derived from the same typo teaches an operator to skim.
@@ -235,8 +240,9 @@ export async function cmdDoctor(deps: DoctorDeps, args: readonly string[]): Prom
     // whether the secret folders are owner-only by their access list (M43 spec 04). No line elsewhere:
     // on POSIX the mode bits are checked where the files are read, as before.
     ...(deps.host.platform === "win32" ? [windowsTask(deps), windowsLongPaths(deps), secretsPrivate(deps)] : []),
-    beaconHooks(deps, hookEntries, declaration?.supports.agentDetection ?? true),
-    await beacons(deps, hookEntries.length > 0),
+    beaconHooks(deps, hookEntries, declaration?.supports.agentDetection ?? true, omp.kind === "installed"),
+    beaconHooksOmp(deps, ompPath, omp),
+    await beacons(deps, hookEntries.length > 0 || omp.kind === "installed"),
     // Why a pane's History link is not there (issue #137) — its own module, because the chain it
     // walks (Herdr's build, its per-agent hook, the interpreter that hook needs, what the bridge
     // reports per pane, where a journal would be read from) is a section rather than a check.
@@ -1882,14 +1888,16 @@ function beaconHooks(
   deps: DoctorDeps,
   entries: readonly InstalledEntry[],
   muxReportsAgents: boolean,
+  ompInstalled: boolean,
 ): Finding {
   const check = "beacon-hooks-claude";
   const would = resolveHookCommand(deps.ctx, deps.link);
   const name = muxSettings(deps).name;
   const install =
     `\`collie hooks install claude\` (writes ${String(BEACON_HOOKS.length)} marked entries into` +
-    " ~/.claude/settings.json; running Claudes must be relaunched)";
+    " ~/.claude/settings.json; running Claudes must be relaunched), or `collie hooks install omp` for omp";
   if (entries.length === 0) {
+    if (ompInstalled) return ok(check, "not installed for Claude — the omp extension is, so omp panes name themselves");
     return muxReportsAgents
       ? ok(check, `not needed — ${name} reports agents itself; hooks installed: no`)
       : bad(
@@ -1953,6 +1961,41 @@ function beaconHooks(
 }
 
 /**
+ * `beacon-hooks-omp` — is the omp extension in place, written by this build, and does the binary it
+ * spawns still exist? An ABSENT extension is never a fault here: whether a host needs some emitter
+ * at all is `beacon-hooks-claude`'s question, and a second red line for the same gap would be noise.
+ */
+function beaconHooksOmp(deps: DoctorDeps, path: string, state: OmpExtensionState): Finding {
+  const check = "beacon-hooks-omp";
+  switch (state.kind) {
+    case "absent":
+      return ok(check, `not installed (${path}) — \`collie hooks install omp\` if you run omp in a pane here`);
+    case "foreign":
+      return warn(
+        check,
+        `${path} exists but is not collie's — no collie-beacon marker on its first line`,
+        "move it aside, then `collie hooks install omp`",
+      );
+    case "installed":
+      if (state.binary === null || !deps.files.exists(state.binary)) {
+        return warn(
+          check,
+          `the omp extension spawns \`${state.binary ?? "?"}\`, which is not there any more — omp panes never name themselves`,
+          "`collie link` here, then `collie hooks install omp` to re-pin it (and restart omp)",
+        );
+      }
+      if (!state.current) {
+        return warn(
+          check,
+          `installed at v${String(state.version)}, and its bytes differ from what this build writes — the extension is ours and out of date`,
+          "`collie hooks install omp` — it rewrites only its own file (restart omp to load it)",
+        );
+      }
+      return ok(check, `v${String(state.version)} at ${path}, spawning \`${state.binary}\``);
+  }
+}
+
+/**
  * `beacons` — how many agents have identified themselves here, and how many of those are gone.
  *
  * An expired beacon is ORDINARY and never a warning: agents end. Its pane goes back to reading as a
@@ -1974,7 +2017,7 @@ async function beacons(deps: DoctorDeps, installed: boolean): Promise<Finding> {
         : "nothing writes one here, because the emitter is not installed",
       installed
         ? "start (or prompt) an agent in a pane and re-run `collie doctor`"
-        : "`collie hooks install claude`",
+        : "`collie hooks install claude` (or `collie hooks install omp`)",
     );
   }
   return ok(

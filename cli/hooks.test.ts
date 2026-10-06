@@ -9,6 +9,8 @@ import {
   cmdHooksStatus,
   cmdHooksUninstall,
   HOOK_MARKER,
+  ompBinaryOf,
+  ompExtensionPath,
   type HooksDeps,
   installDocument,
   markedCommandIn,
@@ -406,7 +408,7 @@ describe("install", () => {
       const d = deps();
       expect(cmdHooksInstall(d, args)).toBe(EXIT.USAGE);
       expect(d.files.entries.size).toBe(0);
-      expect(d.io.stderr.join("\n")).toContain("collie hooks install {claude}");
+      expect(d.io.stderr.join("\n")).toContain("collie hooks install {claude|omp}");
     }
   });
 });
@@ -533,5 +535,74 @@ describe("status --check", () => {
   test("does not answer `behind` for a file it cannot read — that is doctor's business", () => {
     const d = deps({ files: { [SETTINGS]: "{ not json" } });
     expect(cmdHooksStatus(d, ["--check"])).toBe(EXIT.OK);
+  });
+});
+
+describe("omp — one extension file collie owns", () => {
+  const EXTENSION = join(HOME, ".omp", "agent", "extensions", "collie-beacon.ts");
+
+  test("lives in ~/.omp/agent/extensions, or under PI_CODING_AGENT_DIR when omp is told so", () => {
+    expect(ompExtensionPath(context({}))).toBe(EXTENSION);
+    expect(ompExtensionPath(context({ PI_CODING_AGENT_DIR: join("/srv", "omp") }))).toBe(
+      join("/srv", "omp", "extensions", "collie-beacon.ts"),
+    );
+  });
+
+  test("install writes it with the marker on line one and the binary pinned, spawning `beacon emit omp`", () => {
+    const d = deps({ linked: true });
+    expect(cmdHooksInstall(d, ["omp"])).toBe(EXIT.OK);
+    const text = d.files.entries.get(EXTENSION)?.text ?? "";
+    expect(text.split("\n")[0]).toBe(`// ${HOOK_MARKER} omp`);
+    expect(ompBinaryOf(text)).toBe(PUBLISHED);
+    expect(text).toContain('["beacon", "emit", "omp"]');
+    // The mux gate is the emitter's own table, tern included.
+    expect(text).toContain('["TERN_PANE","TERN_PANE_SOCKET"]');
+    // Claude's settings are not touched by an omp install.
+    expect(d.files.entries.has(SETTINGS)).toBe(false);
+    expect(d.io.stdout.join("\n")).toContain("Restart running omp sessions");
+  });
+
+  test("installing twice changes no bytes", () => {
+    const first = deps();
+    cmdHooksInstall(first, ["omp"]);
+    const text = first.files.entries.get(EXTENSION)!.text;
+    const again = deps({ files: { [EXTENSION]: text } });
+    expect(cmdHooksInstall(again, ["omp"])).toBe(EXIT.OK);
+    expect(again.files.entries.get(EXTENSION)?.text).toBe(text);
+    expect(again.io.stdout.join("\n")).toContain("no bytes changed");
+  });
+
+  test("an extension whose bytes differ from this build's is behind, and install heals it", () => {
+    const first = deps();
+    cmdHooksInstall(first, ["omp"]);
+    const older = first.files.entries.get(EXTENSION)!.text.replace("const IDLE_DEBOUNCE_MS = 250;", "const IDLE_DEBOUNCE_MS = 100;");
+    const d = deps({ files: { [EXTENSION]: older } });
+    expect(cmdHooksStatus(d, ["--check"])).toBe(EXIT.STATE);
+    cmdHooksStatus(d);
+    expect(d.io.stdout.join("\n")).toContain("behind this build");
+    expect(cmdHooksInstall(d, ["omp"])).toBe(EXIT.OK);
+    const healed = deps({ files: { [EXTENSION]: d.files.entries.get(EXTENSION)!.text } });
+    expect(cmdHooksStatus(healed, ["--check"])).toBe(EXIT.OK);
+    cmdHooksStatus(healed);
+    expect(healed.io.stdout.join("\n")).toContain(`${EXTENSION}: omp extension installed (v1)`);
+  });
+
+  test("a file without our marker is never overwritten and never removed", () => {
+    const theirs = "export default function (pi) {}\n";
+    const d = deps({ files: { [EXTENSION]: theirs } });
+    expect(cmdHooksInstall(d, ["omp"])).toBe(EXIT.FAIL);
+    expect(cmdHooksUninstall(d, ["omp"])).toBe(EXIT.OK);
+    expect(d.files.entries.get(EXTENSION)?.text).toBe(theirs);
+    // Somebody else's file is not ours being behind.
+    expect(cmdHooksStatus(d, ["--check"])).toBe(EXIT.OK);
+  });
+
+  test("uninstall removes ours and leaves Claude's settings alone", () => {
+    const d = deps();
+    cmdHooksInstall(d, ["claude"]);
+    cmdHooksInstall(d, ["omp"]);
+    expect(cmdHooksUninstall(d, ["omp"])).toBe(EXIT.OK);
+    expect(d.files.entries.has(EXTENSION)).toBe(false);
+    expect(d.files.entries.get(SETTINGS)?.text).toContain(HOOK_MARKER);
   });
 });

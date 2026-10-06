@@ -67,9 +67,9 @@ export function tmuxBeaconMatcher(namespace: string, exec: TmuxExec): BeaconMatc
     },
     notesWithoutHooks: {
       agentDetection:
-        "tmux does not know what an agent is, so Collie asks the agent instead: install the beacon hooks with `collie hooks install claude` and a pane running Claude names itself and its status. Until then every pane reads as a shell rather than as a guess that would pick the wrong grammar.",
+        "tmux does not know what an agent is, so Collie asks the agent instead: install the beacon hooks with `collie hooks install claude` (or `collie hooks install omp`) and a pane running that agent names itself and its status. Until then every pane reads as a shell rather than as a guess that would pick the wrong grammar.",
       agentSessionRef:
-        "Pane history reads the agent's own session log, and tmux supplies no reference to one. `collie hooks install claude` lets the agent supply it; until then history is absent here, not empty.",
+        "Pane history reads the agent's own session log, and tmux supplies no reference to one. `collie hooks install claude` (or `collie hooks install omp`) lets the agent supply it; until then history is absent here, not empty.",
     },
   };
 }

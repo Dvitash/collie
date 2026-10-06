@@ -23,6 +23,10 @@ Running a crew? Update the lead first; members follow on their own. Details:
 
 ## [Unreleased]
 
+### Added
+
+- **omp agents name themselves on tern, tmux and zellij.** `collie hooks install omp` writes a marked extension to `~/.omp/agent/extensions/collie-beacon.ts` that reports working, waiting and idle through `collie beacon emit omp`, so an omp pane shows as an agent, lights "Needs you" and links its session history; `hooks status`, `hooks uninstall omp` and `collie doctor`'s `beacon-hooks-omp` cover it (ADR 0086)
+
 ### Changed
 
 - **Visible, followed chats schedule their next refresh 1 ms after completion.** Requests stay single-flight, including when an idle pane is open; browser timers, network and rendering determine the actual rate. Busy dashboards refresh every second, idle views and scrolled-back chats every 1.5 seconds, and hidden tabs pause.

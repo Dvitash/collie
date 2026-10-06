@@ -67,6 +67,7 @@ Then restart, install the beacon hooks, and start an agent where the phone can s
 ```bash
 collie restart                 # after every .env edit
 collie hooks install claude    # once per host, tmux, zellij and tern only
+collie hooks install omp       # the same, for omp (oh-my-pi) agents
 
 # open a window or a tab for the agent
 tmux -S /run/user/1000/collie-tmux.sock new-window -n claude
@@ -143,6 +144,7 @@ Point Collie at Tern:
 ```bash
 COLLIE_MUX=tern collie start
 collie hooks install claude   # beacon hooks for agent detection
+collie hooks install omp      # and the omp extension, if you run omp
 ```
 
 Collie reads Tern sessions as spaces, tabs as tabs, and blocks as panes. The endpoint is the Tern daemon's socket, defaulting to `$XDG_RUNTIME_DIR/tern/daemon.sock` (or `/tmp/tern-<uid>/daemon.sock`). Inside a Tern pane, `$TERN_PANE` identifies the block and `$TERN_PANE_SOCKET` points at the daemon socket.
@@ -242,9 +244,34 @@ Behavior details for Claude configuration changes:
   reads this variable directly; otherwise, beacons write to the default state directory where the
   bridge will not find them.
 
-`collie doctor` includes a `beacon-hooks-claude` diagnostic check that points out missing hooks or
-broken paths to moved checkouts. For runtime details, see
+`collie doctor` includes `beacon-hooks-claude` and `beacon-hooks-omp` diagnostic checks that point
+out missing hooks or broken paths to moved checkouts. For runtime details, see
 [Agent beacons](#agent-beacons-optional-linux).
+
+### omp has no shell hooks, so Collie writes an extension
+
+```console
+$ collie hooks install omp
+$ collie hooks status
+would install: /home/you/.local/bin/collie beacon emit  (the published PATH name)
+/home/you/.claude/settings.json: not installed
+/home/you/.omp/agent/extensions/collie-beacon.ts: omp extension installed (v1)
+```
+
+omp loads TypeScript extensions from `~/.omp/agent/extensions/` (or `$PI_CODING_AGENT_DIR/extensions/`),
+and has no hook that runs a command. `hooks install omp` writes one file there, `collie-beacon.ts`,
+whose first line is `// # collie-beacon v1 omp` and which pins the same collie binary path the Claude
+hooks use.
+
+- The extension follows omp's own events and reports **working**, **waiting** (a tool approval, an
+  `ask` question, or a provider error that outlasted its retry) and **idle**, once per change. Each
+  report spawns `collie beacon emit omp` directly, so the beacon's pid is the omp process.
+- It does nothing outside tern, tmux and zellij, and nothing in a subagent session.
+- **Restart running omp sessions** to load it; omp reads extensions only at startup.
+- `hooks install omp` refuses to overwrite a `collie-beacon.ts` that lacks the marker, and
+  `hooks uninstall omp` removes the file only when it carries it.
+- `hooks status --check` reports the extension as behind when its bytes differ from what this build
+  writes; `collie hooks install omp` rewrites it.
 
 ### What changes compared with Herdr
 
